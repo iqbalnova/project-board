@@ -1,13 +1,16 @@
 'use strict';
 (() => {
-  /* ======================= konstanta & state ======================= */
+  /* ======================= KONSTANTA & STATE ======================= */
   const DAY = 86400000;
   const STATUSES = [['todo', 'To Do'], ['doing', 'In Progress'], ['review', 'Review'], ['done', 'Done']];
+  const STATUS_SHORT = { todo: 'Todo', doing: 'Progress', review: 'Review', done: 'Done' };
   const STATUS_LABEL = Object.fromEntries(STATUSES);
   const PRIO_OPTIONS = [['low', 'Rendah'], ['medium', 'Sedang'], ['high', 'Tinggi']];
   const PHASE_OPTIONS = [['planned', 'Direncanakan'], ['active', 'Berjalan'], ['done', 'Selesai']];
   const PHASE_LABEL = Object.fromEntries(PHASE_OPTIONS);
   const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+  const MON_FULL = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+  const DOW = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
 
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch (_) { return null; } },
@@ -21,19 +24,23 @@
     q: '',
     refocus: null,
     cascade: store.get('cascade') !== '0',
-    theme: store.get('theme') === 'dark' ? 'dark' : 'light', // Default: Light Mode
+    theme: store.get('theme') === 'dark' ? 'dark' : 'light',
+    // Skala timeline chart: 'fit' (penuh) atau angka pxPerDay (4 .. 120)
+    scaleMode: store.get('scaleMode') || '1d', // '1d' | '3d' | '1w' | 'fit' | 'custom'
+    pxPerDay: Number(store.get('pxPerDay')) || 42,
+    scrollLeft: 0,
   };
   let dragging = false;
   let dragId = null;
 
-  /* ======================= tema (Light default) ======================= */
+  /* ======================= TEMA ======================= */
   function applyTheme() {
     document.documentElement.dataset.theme = ui.theme;
     const btn = document.getElementById('btn-theme');
-    if (btn) btn.textContent = ui.theme === 'dark' ? '🌙 Dark' : '☀️ Light';
+    if (btn) btn.textContent = ui.theme === 'dark' ? 'Dark' : 'Light';
   }
 
-  /* ======================= util DOM ======================= */
+  /* ======================= UTIL DOM & SVG ======================= */
   const $ = (sel) => document.querySelector(sel);
 
   function h(tag, attrs, ...kids) {
@@ -55,9 +62,25 @@
     }
     return el;
   }
-  const badge = (text, cls) => h('span', { class: 'badge ' + cls }, text);
 
-  /* ======================= tanggal ======================= */
+  function statusSvg(st) {
+    const span = document.createElement('span');
+    span.className = 'st-icon';
+    if (st === 'todo') {
+      span.innerHTML = `<svg viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="5.2" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2.2 2"/></svg>`;
+    } else if (st === 'doing') {
+      span.innerHTML = `<svg viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="5.2" stroke="currentColor" stroke-width="1.4"/><path d="M7 1.8A5.2 5.2 0 0 1 7 12.2Z" fill="currentColor"/></svg>`;
+    } else if (st === 'review') {
+      span.innerHTML = `<svg viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="5.2" stroke="currentColor" stroke-width="1.4"/><circle cx="7" cy="7" r="2.6" fill="currentColor"/></svg>`;
+    } else {
+      span.innerHTML = `<svg viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="5.5" fill="currentColor"/><path d="M4.5 7.1L6.3 8.9L9.6 5.3" stroke="var(--panel)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    }
+    return span;
+  }
+
+  const badge = (text, cls = '') => h('span', { class: ('badge ' + cls).trim() }, text);
+
+  /* ======================= TANGGAL ======================= */
   const T = (s) => Date.parse(s + 'T00:00:00Z');
   const fmt = (s) => new Date(T(s)).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
   const fmtShort = (s) => new Date(T(s)).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', timeZone: 'UTC' });
@@ -66,7 +89,7 @@
   const addDays = (s, n) => new Date(T(s) + n * DAY).toISOString().slice(0, 10);
   const days = (p) => Math.round((T(p.end) - T(p.start)) / DAY) + 1;
 
-  /* ======================= data helper ======================= */
+  /* ======================= DATA HELPER ======================= */
   const phases = () => [...S.phases].sort((a, b) => a.start.localeCompare(b.start) || a.id.localeCompare(b.id));
   const phaseById = (id) => S.phases.find((p) => p.id === id) || null;
   const tasksOf = (pid) => S.tasks.filter((t) => t.phaseId === pid);
@@ -96,7 +119,12 @@
     if (!res.ok) throw new Error((data && data.error) || `Gagal (${res.status})`);
     return data;
   }
-  async function mutate(method, url, body) { S = await api(method, url, body); render(); }
+  async function mutate(method, url, body) {
+    const vp = document.querySelector('.g-viewport');
+    if (vp) ui.scrollLeft = vp.scrollLeft;
+    S = await api(method, url, body);
+    render();
+  }
 
   let toastTimer;
   function toast(msg, isErr) {
@@ -104,11 +132,11 @@
     el.textContent = msg;
     el.className = 'show' + (isErr ? ' err' : '');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { el.className = ''; }, 4000);
+    toastTimer = setTimeout(() => { el.className = ''; }, 3200);
   }
   const safe = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message, true); } };
 
-  /* ======================= helper navigasi & aksi cepat ======================= */
+  /* ======================= NAVIGASI & AKSI ======================= */
   function jumpToPhase(id) {
     const el = document.getElementById('phase-' + id);
     if (!el) return;
@@ -116,7 +144,7 @@
     el.classList.remove('flash');
     void el.offsetWidth;
     el.classList.add('flash');
-    setTimeout(() => el.classList.remove('flash'), 1400);
+    setTimeout(() => el.classList.remove('flash'), 1200);
   }
 
   function openPhaseInKanban(id) {
@@ -127,7 +155,6 @@
     render();
   }
 
-  // Geser keseluruhan phase (start & end) atau ubah durasi (end saja) dengan 1 klik
   const adjustPhaseDates = safe(async (p, deltaStart, deltaEnd) => {
     const newStart = addDays(p.start, deltaStart);
     let newEnd = addDays(p.end, deltaEnd);
@@ -136,11 +163,10 @@
       name: p.name, goal: p.goal, status: p.status,
       start: newStart, end: newEnd, cascade: ui.cascade,
     });
-    toast(`Timeline ${p.name}: ${fmtShort(newStart)} → ${fmtShort(newEnd)} (${days({ start: newStart, end: newEnd })} hari)`);
   });
 
-  /* ======================= dialog ======================= */
-  function openForm({ title, intro, fields, submit = 'Simpan', onSubmit, extraButtons = [], afterBuild }) {
+  /* ======================= DIALOG ======================= */
+  function openForm({ title, intro, fields, submit = 'Simpan', onSubmit, extraButtons = [] }) {
     const dlg = $('#dlg');
     const err = h('div', { class: 'form-err', role: 'alert', hidden: true });
     const inputs = {};
@@ -185,7 +211,6 @@
       },
     }, rows, err, h('div', { class: 'actions-row' }, extras, h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Batal'), submitBtn));
 
-    if (afterBuild) afterBuild(inputs, form);
     dlg.replaceChildren(h('div', { class: 'dlg-in' }, h('h2', {}, title), intro && h('p', { class: 'intro' }, intro), form));
     dlg.showModal();
     setTimeout(() => { const f = form.querySelector('input:not([type=checkbox]),textarea,select'); if (f) f.focus(); }, 0);
@@ -197,7 +222,6 @@
     dlg.showModal();
   }
 
-  /* ---- dialog Clear / Reset DB ---- */
   function resetDialog() {
     const dlg = $('#dlg');
     const doReset = safe(async (mode, msg) => {
@@ -208,25 +232,24 @@
 
     dlg.replaceChildren(
       h('div', { class: 'dlg-in' },
-        h('h2', {}, 'Bersihkan Database (Clear DB)'),
-        h('p', { class: 'intro' }, 'Pilih cara membersihkan data untuk testing. Backup otomatis (.bak) tetap disimpan di server sebelum data dihapus.'),
+        h('h2', {}, 'Clear Database'),
+        h('p', { class: 'intro' }, 'Pilih mode pembersihan data. File backup (.bak) tetap tersimpan otomatis di server.'),
         h('div', { class: 'reset-cards' },
           h('div', { class: 'reset-card' },
             h('div', {},
-              h('h4', {}, '1. Kosongkan Semua (0 Phase & 0 Task)'),
-              h('p', {}, 'Hapus seluruh phase, task, change request, dan riwayat. Mulai benar-benar dari nol.')),
-            h('button', { class: 'btn danger', onclick: () => doReset('empty', 'Database dikosongkan sepenuhnya') }, 'Kosongkan')),
+              h('h4', {}, 'Kosongkan Semua (0 Phase)'),
+              h('p', {}, 'Hapus seluruh phase, task, change request, dan riwayat.')),
+            h('button', { class: 'btn danger small', onclick: () => doReset('empty', 'Database dikosongkan') }, 'Kosongkan')),
           h('div', { class: 'reset-card' },
             h('div', {},
-              h('h4', {}, '2. Reset ke Data Awal (Phase 1 Baru)'),
-              h('p', {}, 'Hapus semua data lama dan buat 1 Phase 1 kosong (2 minggu mulai hari ini).')),
-            h('button', { class: 'btn primary', onclick: () => doReset('seed', 'Database di-reset ke Phase 1 baru') }, 'Reset Phase 1'))),
+              h('h4', {}, 'Reset ke Awal (Phase 1)'),
+              h('p', {}, 'Hapus data lama dan buat Phase 1 baru mulai hari ini.')),
+            h('button', { class: 'btn primary small', onclick: () => doReset('seed', 'Database di-reset ke Phase 1') }, 'Reset Phase 1'))),
         h('div', { class: 'actions' },
           h('button', { class: 'btn', onclick: () => dlg.close() }, 'Batal'))));
     dlg.showModal();
   }
 
-  /* ---- dialog spesifik ---- */
   function phaseDialog(p) {
     const ps = phases();
     const last = ps[ps.length - 1];
@@ -234,13 +257,13 @@
     const end = p ? p.end : addDays(start, 13);
 
     openForm({
-      title: p ? `Edit ${p.name}` : 'Phase baru',
-      intro: p && p.locked ? 'Scope phase ini terkunci, tapi tanggal tetap bisa disesuaikan. Perubahan tercatat di riwayat.' : null,
+      title: p ? `Edit ${p.name}` : 'Buat Phase',
+      intro: p && p.locked ? 'Scope terkunci, namun tanggal tetap dapat disesuaikan.' : null,
       fields: [
         { name: 'name', label: 'Nama phase', required: true, maxlength: 80, value: p ? p.name : `Phase ${ps.length + 1}` },
-        { name: 'goal', label: 'Tujuan / ringkasan scope', type: 'textarea', maxlength: 500, value: p ? p.goal : '', placeholder: 'Contoh: Selesaikan modul autentikasi & dashboard utama' },
-        { name: 'start', label: 'Tanggal mulai', type: 'date', required: true, value: start },
-        { name: 'end', label: 'Tanggal selesai', type: 'date', required: true, value: end },
+        { name: 'goal', label: 'Tujuan / ringkasan scope', type: 'textarea', maxlength: 500, value: p ? p.goal : '' },
+        { name: 'start', label: 'Mulai', type: 'date', required: true, value: start },
+        { name: 'end', label: 'Selesai', type: 'date', required: true, value: end },
         {
           type: 'custom',
           render: (inputs) => {
@@ -249,19 +272,19 @@
               inputs.end.value = addDays(inputs.start.value, d - 1);
             };
             return h('div', { class: 'field' },
-              h('span', {}, 'Preset durasi cepat'),
+              h('span', {}, 'Durasi cepat'),
               h('div', { class: 'preset-row' },
-                [[7, '1 Minggu (7h)'], [14, '2 Minggu (14h)'], [21, '3 Minggu (21h)'], [30, '1 Bulan (30h)']].map(([d, lbl]) =>
+                [[7, '1 Minggu'], [14, '2 Minggu'], [21, '3 Minggu'], [30, '1 Bulan']].map(([d, lbl]) =>
                   h('button', { type: 'button', class: 'btn xs', onclick: () => setDur(d) }, lbl))));
           },
         },
         { name: 'status', label: 'Status', type: 'select', options: PHASE_OPTIONS, value: p ? p.status : (ps.length === 0 ? 'active' : 'planned') },
         ...(p ? [{ name: 'cascade', label: 'Geser phase berikutnya mengikuti perubahan tanggal selesai', type: 'checkbox', value: ui.cascade }] : []),
       ],
-      submit: p ? 'Simpan' : 'Buat phase',
+      submit: p ? 'Simpan' : 'Buat Phase',
       onSubmit: (v) => (p ? mutate('PATCH', `/api/phases/${p.id}`, v) : mutate('POST', '/api/phases', v)),
       extraButtons: p ? [{
-        label: 'Hapus phase', danger: true,
+        label: 'Hapus', danger: true,
         onClick: async () => { if (!confirm(`Hapus ${p.name}?`)) return false; await mutate('DELETE', `/api/phases/${p.id}`); return true; },
       }] : [],
     });
@@ -270,7 +293,7 @@
   function taskDialog(ph, status = 'todo') {
     if (ph.locked) return crDialog(ph.id);
     return openForm({
-      title: `Task baru · ${ph.name}`,
+      title: `Task Baru · ${ph.name}`,
       fields: [
         { name: 'title', label: 'Judul', required: true, maxlength: 200 },
         { name: 'desc', label: 'Deskripsi', type: 'textarea', maxlength: 4000 },
@@ -286,8 +309,8 @@
   function editTaskDialog(t) {
     const cr = t.crId ? S.changes.find((c) => c.id === t.crId) : null;
     openForm({
-      title: 'Edit task',
-      intro: t.origin === 'change' ? `Masuk lewat change request${cr && cr.requestedBy ? ' dari ' + cr.requestedBy : ''}${cr && cr.decisionNote ? ' — ' + cr.decisionNote : ''}.` : null,
+      title: 'Detail Task',
+      intro: t.origin === 'change' ? `Dari Change Request${cr && cr.requestedBy ? ' (' + cr.requestedBy + ')' : ''}${cr && cr.decisionNote ? ' — ' + cr.decisionNote : ''}.` : null,
       fields: [
         { name: 'title', label: 'Judul', required: true, maxlength: 200, value: t.title },
         { name: 'desc', label: 'Deskripsi', type: 'textarea', maxlength: 4000, value: t.desc },
@@ -295,7 +318,7 @@
         { name: 'priority', label: 'Prioritas', type: 'select', options: PRIO_OPTIONS, value: t.priority },
         { name: 'assignee', label: 'PIC', maxlength: 60, value: t.assignee },
         { name: 'due', label: 'Deadline', type: 'date', value: t.due },
-        { name: 'phaseId', label: 'Phase', type: 'select', options: phases().map((p) => [p.id, p.name + (p.locked ? ' 🔒' : '')]), value: t.phaseId },
+        { name: 'phaseId', label: 'Phase', type: 'select', options: phases().map((p) => [p.id, p.name + (p.locked ? ' (Terkunci)' : '')]), value: t.phaseId },
       ],
       onSubmit: (v) => mutate('PATCH', `/api/tasks/${t.id}`, v),
       extraButtons: [{
@@ -307,16 +330,16 @@
 
   function crDialog(phaseId) {
     const cur = phaseById(phaseId) || currentPhase();
-    if (!cur) return toast('Buat phase dulu', true);
+    if (!cur) return toast('Buat phase terlebih dahulu', true);
     return openForm({
-      title: 'Ajukan perubahan',
-      intro: 'Catat permintaan dari stakeholder. Setelah itu putuskan: wajib masuk phase ini, digeser ke phase berikutnya, atau ditolak.',
+      title: 'Ajukan Change Request',
+      intro: 'Catat permintaan perubahan scope dari stakeholder untuk diputuskan.',
       fields: [
-        { name: 'title', label: 'Apa yang diminta', required: true, maxlength: 200 },
+        { name: 'title', label: 'Perubahan yang diminta', required: true, maxlength: 200 },
         { name: 'desc', label: 'Detail', type: 'textarea', maxlength: 4000 },
         { name: 'requestedBy', label: 'Diminta oleh', maxlength: 80 },
-        { name: 'reason', label: 'Alasan / dampak ke timeline', type: 'textarea', maxlength: 1000 },
-        { name: 'phaseId', label: 'Diajukan saat phase', type: 'select', options: phases().map((p) => [p.id, p.name]), value: cur.id },
+        { name: 'reason', label: 'Alasan / dampak', type: 'textarea', maxlength: 1000 },
+        { name: 'phaseId', label: 'Phase terkait', type: 'select', options: phases().map((p) => [p.id, p.name]), value: cur.id },
       ],
       submit: 'Ajukan',
       onSubmit: (v) => mutate('POST', '/api/changes', v),
@@ -327,19 +350,19 @@
     const ph = phaseById(c.phaseId);
     const nxt = nextPhaseOf(c.phaseId);
     const cfg = {
-      current: { title: `Wajib masuk ${ph ? ph.name : 'phase ini'}`, intro: `"${c.title}" akan jadi task baru di ${ph ? ph.name : 'phase ini'} (ditandai CR). Scope baseline tidak diubah.`, submit: 'Setujui & masukkan' },
-      next: { title: `Geser ke ${nxt ? nxt.name : 'phase berikutnya'}`, intro: `"${c.title}" masuk ${nxt ? nxt.name : 'phase berikutnya'} sebagai task baru (ditandai CR). Phase sekarang tidak terganggu.`, submit: 'Geser' },
-      reject: { title: 'Tolak perubahan', intro: `"${c.title}" tidak dikerjakan.`, submit: 'Tolak' },
+      current: { title: `Masukkan ke ${ph ? ph.name : 'phase ini'}`, intro: `"${c.title}" akan masuk ke ${ph ? ph.name : 'phase ini'} dengan label CR.`, submit: 'Setujui' },
+      next: { title: `Geser ke ${nxt ? nxt.name : 'phase berikutnya'}`, intro: `"${c.title}" akan dimasukkan ke ${nxt ? nxt.name : 'phase berikutnya'} (label CR).`, submit: 'Geser' },
+      reject: { title: 'Tolak Change Request', intro: `"${c.title}" ditolak dan tidak masuk scope.`, submit: 'Tolak' },
     }[decision];
     const fields = [{
       name: 'note', type: 'textarea', maxlength: 1000, required: decision === 'current',
-      label: decision === 'current' ? 'Alasan kenapa wajib masuk sekarang' : 'Catatan keputusan (opsional)',
+      label: decision === 'current' ? 'Alasan wajib masuk phase berjalan' : 'Catatan keputusan (opsional)',
     }];
     if (decision !== 'reject') fields.push({ name: 'priority', label: 'Prioritas task', type: 'select', options: PRIO_OPTIONS, value: decision === 'current' ? 'high' : 'medium' });
     if (decision === 'current') {
       fields.push(
-        { name: 'extendDays', label: 'Perpanjang timeline phase (hari)', type: 'number', min: 0, max: 365, step: 1, value: 0, hint: '0 = tanpa perpanjangan' },
-        { name: 'cascade', label: 'Geser juga phase berikutnya sebanyak itu', type: 'checkbox', value: true },
+        { name: 'extendDays', label: 'Tambah durasi phase (hari)', type: 'number', min: 0, max: 365, step: 1, value: 0 },
+        { name: 'cascade', label: 'Geser phase berikutnya otomatis', type: 'checkbox', value: true },
       );
     }
     openForm({ ...cfg, fields, onSubmit: (v) => mutate('POST', `/api/changes/${c.id}/decide`, { decision, ...v }) });
@@ -348,78 +371,89 @@
   const toggleLock = safe(async (p) => {
     if (!p.locked) {
       const n = tasksOf(p.id).length;
-      if (!confirm(`Kunci scope ${p.name}?\n\n${n} item saat ini menjadi baseline yang disetujui. Item baru setelah ini harus lewat Change Request.`)) return;
-    } else if (!confirm('Buka kunci scope? Ini akan tercatat di riwayat.')) return;
+      if (!confirm(`Kunci scope ${p.name}?\n\n${n} item saat ini ditetapkan sebagai baseline. Penambahan baru harus melalui Change Request.`)) return;
+    } else if (!confirm('Buka kunci scope phase ini?')) return;
     await mutate('POST', `/api/phases/${p.id}/lock`, { locked: !p.locked });
   });
 
   function logDialog() {
     const fmtTs = (ts) => new Date(ts).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' });
-    infoDialog('Riwayat scope & timeline', S.log.length
+    infoDialog('Riwayat Perubahan', S.log.length
       ? h('ul', { class: 'log' }, S.log.map((l) => h('li', {}, h('time', {}, fmtTs(l.ts)), l.text)))
       : h('p', { class: 'empty' }, 'Belum ada riwayat.'));
   }
 
-  /* ======================= TIMELINE ======================= */
-  function summaryStrip(ps) {
-    if (!ps.length) return null;
-    const minStart = ps.reduce((m, p) => (p.start < m ? p.start : m), ps[0].start);
-    const maxEnd = ps.reduce((m, p) => (p.end > m ? p.end : m), ps[0].end);
-    const totalSpan = days({ start: minStart, end: maxEnd });
-    const totalTasks = S.tasks.length;
-    const doneTasks = S.tasks.filter((t) => t.status === 'done').length;
-    const pct = totalTasks ? Math.round((doneTasks / totalTasks) * 100) : 0;
-    const activePh = ps.find((p) => p.status === 'active');
-    const pendingCr = S.changes.filter((c) => c.status === 'pending').length;
-
-    return h('div', { class: 'summary-strip' },
-      h('div', { class: 'stat-box' },
-        h('span', { class: 'lbl' }, 'Total Timeline'),
-        h('span', { class: 'val' }, `${totalSpan} Hari`),
-        h('span', { class: 'sub' }, `${fmtShort(minStart)} → ${fmt(maxEnd)}`)),
-      h('div', { class: 'stat-box' },
-        h('span', { class: 'lbl' }, 'Phase Berjalan'),
-        h('span', { class: 'val' }, activePh ? activePh.name : `${ps.length} Phase`),
-        h('span', { class: 'sub' }, activePh ? `${fmtShort(activePh.start)} – ${fmtShort(activePh.end)}${activePh.locked ? ' · 🔒 Terkunci' : ''}` : 'Belum ada yang berstatus Berjalan')),
-      h('div', { class: 'stat-box' },
-        h('span', { class: 'lbl' }, 'Progress Keseluruhan'),
-        h('span', { class: 'val' }, `${pct}% (${doneTasks}/${totalTasks})`),
-        h('span', { class: 'sub' }, totalTasks ? `${totalTasks - doneTasks} item belum selesai` : 'Belum ada item scope')),
-      h('div', { class: 'stat-box' },
-        h('span', { class: 'lbl' }, 'Change Request'),
-        h('span', { class: 'val' }, pendingCr ? `${pendingCr} Menunggu` : '0 Menunggu'),
-        h('span', { class: 'sub' }, `${S.changes.length} total pengajuan perubahan`)));
+  /* ======================= CRYPTO-CHART INTERACTIVE TIMELINE ======================= */
+  function setScalePreset(mode, px) {
+    ui.scaleMode = mode;
+    if (px) ui.pxPerDay = px;
+    store.set('scaleMode', mode);
+    if (px) store.set('pxPerDay', String(px));
+    render();
   }
 
-  function ticks(t0, t1) {
-    const out = [];
-    const span = (t1 - t0) / DAY;
-    if (span <= 21) {
-      const d = new Date(t0);
-      d.setUTCHours(0, 0, 0, 0);
-      for (; +d <= t1; d.setUTCDate(d.getUTCDate() + 2)) {
-        out.push({ t: +d, label: `${d.getUTCDate()} ${MON[d.getUTCMonth()]}` });
+  // Hitung ticks dinamis berdasarkan kerapatan pixel per hari (seperti TradingView)
+  function buildTimeAxis(t0, t1, pxPerDay) {
+    const daysTotal = Math.round((t1 - t0) / DAY);
+    const months = [];
+    const ticks = [];
+    const weekends = [];
+    const nowT = T(todayStr());
+
+    // Tentukan step hari berdasarkan zoom (pxPerDay):
+    // >= 24px/hari -> tampilkan TIAP 1 HARI penuh
+    // >= 12px/hari -> tiap 2 hari
+    // >= 6px/hari  -> mingguan (Senin)
+    // < 6px/hari   -> awal bulan
+    let stepDays = 1;
+    if (pxPerDay >= 24) stepDays = 1;
+    else if (pxPerDay >= 12) stepDays = 2;
+    else if (pxPerDay >= 6) stepDays = 7;
+    else stepDays = 30;
+
+    let curMonthKey = '';
+    const d = new Date(t0);
+    d.setUTCHours(0, 0, 0, 0);
+
+    for (let i = 0; i <= daysTotal; i++) {
+      const t = t0 + i * DAY;
+      const dt = new Date(t);
+      const yr = dt.getUTCFullYear();
+      const mo = dt.getUTCMonth();
+      const dateNum = dt.getUTCDate();
+      const dow = dt.getUTCDay();
+
+      const mKey = `${yr}-${mo}`;
+      if (mKey !== curMonthKey) {
+        curMonthKey = mKey;
+        months.push({ t, label: `${MON_FULL[mo]} ${yr}` });
       }
-    } else if (span <= 90) {
-      const d = new Date(t0);
-      d.setUTCHours(0, 0, 0, 0);
-      while (d.getUTCDay() !== 1) d.setUTCDate(d.getUTCDate() + 1);
-      for (; +d <= t1; d.setUTCDate(d.getUTCDate() + 7)) {
-        out.push({ t: +d, label: `${d.getUTCDate()} ${MON[d.getUTCMonth()]}` });
+
+      if (pxPerDay >= 18 && (dow === 0 || dow === 6)) {
+        weekends.push({ t });
       }
-    } else {
-      const s = new Date(t0);
-      const d = new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth() + 1, 1));
-      for (; +d <= t1; d.setUTCMonth(d.getUTCMonth() + 1)) {
-        out.push({ t: +d, label: `${MON[d.getUTCMonth()]} '${String(d.getUTCFullYear()).slice(2)}` });
+
+      if (stepDays === 1) {
+        const lbl = pxPerDay >= 46 ? `${DOW[dow]} ${dateNum}` : `${dateNum}`;
+        ticks.push({ t, label: lbl, major: dateNum === 1 || dow === 1, isToday: t === nowT });
+      } else if (stepDays === 2) {
+        if (i % 2 === 0) {
+          ticks.push({ t, label: `${dateNum} ${MON[mo]}`, major: dateNum <= 2, isToday: t === nowT });
+        }
+      } else if (stepDays === 7) {
+        if (dow === 1) {
+          ticks.push({ t, label: `${dateNum} ${MON[mo]}`, major: true, isToday: false });
+        }
+      } else if (dateNum === 1) {
+        ticks.push({ t, label: `${MON[mo]} '${String(yr).slice(2)}`, major: true, isToday: false });
       }
     }
-    return out;
+
+    return { months, ticks, weekends, stepDays };
   }
 
-  // Interactive drag/resize pada Gantt bar
-  function attachBarDrag(barEl, trackEl, p, spanMs) {
-    let mode = null; // 'move' | 'start' | 'end'
+  function attachBarDrag(barEl, canvasEl, p, spanMs) {
+    let mode = null;
     let startX = 0;
     let moved = false;
     let deltaDays = 0;
@@ -458,25 +492,24 @@
 
     function onMove(e) {
       const dx = e.clientX - startX;
-      if (Math.abs(dx) > 4) moved = true;
+      if (Math.abs(dx) > 3) moved = true;
       if (!moved) return;
-      const trackWidth = trackEl.getBoundingClientRect().width || 1;
-      const msPerPx = spanMs / trackWidth;
-      deltaDays = Math.round((dx * msPerPx) / DAY);
+      const trackWidth = canvasEl.getBoundingClientRect().width || 1;
+      const totalDays = spanMs / DAY;
+      const pxDay = trackWidth / totalDays;
+      deltaDays = Math.round(dx / pxDay);
       const { s, e: endStr } = computeDates(deltaDays);
       const dur = days({ start: s, end: endStr });
-      if (lblEl) lblEl.textContent = `${fmtShort(s)} → ${fmtShort(endStr)} (${dur}h)`;
-      const pxDay = trackWidth / (spanMs / DAY);
+      if (lblEl) lblEl.textContent = `${p.name} · ${fmtShort(s)} – ${fmtShort(endStr)} (${dur}h)`;
+
       if (mode === 'move') {
         barEl.style.transform = `translateX(${deltaDays * pxDay}px)`;
       } else if (mode === 'end') {
-        const origDur = days({ start: origStart, end: origEnd });
-        barEl.style.width = `${Math.max(18, ( dur / (spanMs / DAY)) * trackWidth)}px`;
-        void origDur;
+        barEl.style.width = `${Math.max(14, dur * pxDay)}px`;
       } else if (mode === 'start') {
-        const actualShift = Math.round((T(s) - T(origStart)) / DAY);
-        barEl.style.transform = `translateX(${actualShift * pxDay}px)`;
-        barEl.style.width = `${Math.max(18, (dur / (spanMs / DAY)) * trackWidth)}px`;
+        const shift = Math.round((T(s) - T(origStart)) / DAY);
+        barEl.style.transform = `translateX(${shift * pxDay}px)`;
+        barEl.style.width = `${Math.max(14, dur * pxDay)}px`;
       }
     }
 
@@ -501,133 +534,240 @@
           name: p.name, goal: p.goal, status: p.status,
           start: s, end: e, cascade: ui.cascade,
         });
-        toast(`Timeline ${p.name} diperbarui: ${fmtShort(s)} → ${fmtShort(e)}`);
       } catch (err) {
         toast(err.message, true);
         render();
       }
     }
 
-    const leftHandle = barEl.querySelector('.g-handle.left');
-    const rightHandle = barEl.querySelector('.g-handle.right');
-    if (leftHandle) leftHandle.addEventListener('mousedown', (e) => onDown(e, 'start'));
-    if (rightHandle) rightHandle.addEventListener('mousedown', (e) => onDown(e, 'end'));
+    barEl.querySelector('.g-handle.left').addEventListener('mousedown', (e) => onDown(e, 'start'));
+    barEl.querySelector('.g-handle.right').addEventListener('mousedown', (e) => onDown(e, 'end'));
     barEl.addEventListener('mousedown', (e) => onDown(e, 'move'));
     barEl.addEventListener('dblclick', (e) => { e.stopPropagation(); phaseDialog(p); });
   }
 
-  function gantt(ps) {
-    const t0 = Math.min(...ps.map((p) => T(p.start))) - 3 * DAY;
-    const t1 = Math.max(...ps.map((p) => T(p.end))) + 5 * DAY;
-    const span = Math.max(DAY * 7, t1 - t0);
-    const pct = (t) => ((t - t0) / span) * 100;
-    const tk = ticks(t0, t1);
+  function ganttChart(ps) {
+    const minP = Math.min(...ps.map((p) => T(p.start)));
+    const maxP = Math.max(...ps.map((p) => T(p.end)));
     const now = T(todayStr());
+
+    // Padding ekstra agar leluasa di-pan & di-stretch seperti chart
+    const padBefore = ui.scaleMode === 'fit' ? 2 * DAY : 5 * DAY;
+    const padAfter = ui.scaleMode === 'fit' ? 3 * DAY : 10 * DAY;
+    const t0 = minP - padBefore;
+    const t1 = Math.max(maxP + padAfter, t0 + 14 * DAY);
+    const span = t1 - t0;
+    const totalDays = Math.round(span / DAY);
+
+    // Estimasi lebar viewport (1400 - sidebar 230 = ~1120px)
+    const vpEstWidth = Math.max(520, Math.min(1360, window.innerWidth - 40) - 232);
+    const effectivePxPerDay = ui.scaleMode === 'fit'
+      ? Math.max(4, vpEstWidth / totalDays)
+      : Math.max(4, Math.min(120, ui.pxPerDay));
+
+    const canvasWidthStyle = ui.scaleMode === 'fit'
+      ? '100%'
+      : `${Math.max(vpEstWidth, Math.round(totalDays * effectivePxPerDay))}px`;
+
+    const pct = (t) => ((t - t0) / span) * 100;
+    const dayWidthPct = (DAY / span) * 100;
+    const { months, ticks, weekends, stepDays } = buildTimeAxis(t0, t1, effectivePxPerDay);
     const showToday = now >= t0 && now <= t1;
 
-    return h('div', { class: 'gantt-wrap' },
-      h('div', { class: 'gantt-hint' },
-        h('span', {}, '💡 Tips: Geser bar untuk memindahkan jadwal, tarik tepi kiri/kanan bar untuk mengubah durasi, atau klik 2× untuk edit detail.'),
-        h('span', {}, showToday ? '🔴 Garis merah = Hari ini (' + fmtShort(todayStr()) + ')' : '')),
-      h('div', { class: 'gantt' },
-        h('div', { class: 'g-header' },
-          h('div', { class: 'g-col-title' }, 'Phase & Jadwal'),
-          h('div', { class: 'g-axis' },
-            tk.map((k) => h('span', { style: { left: pct(k.t) + '%' } }, k.label)),
-            showToday && h('span', { class: 'today-pill', style: { left: pct(now) + '%' } }, 'Hari ini'))),
-        h('div', { class: 'g-body' },
-          h('div', { class: 'g-lines' },
-            tk.map((k) => h('i', { style: { left: pct(k.t) + '%' } })),
-            showToday && h('b', { class: 'today', title: 'Hari ini', style: { left: pct(now) + '%' } })),
-          ps.map((p) => {
-            const st = stats(p);
-            const dur = days(p);
-            const trackEl = h('div', { class: 'g-track' });
-            const barEl = h('div', {
-              class: 'g-bar ' + p.status + (p.locked ? ' locked' : ''),
-              title: `${p.name}: ${fmt(p.start)} → ${fmt(p.end)} (${dur} hari) · ${st.done}/${st.total} selesai\nGeser bar untuk pindah tanggal, tarik ujung untuk ubah durasi, klik 2x untuk edit.`,
-              style: { left: pct(T(p.start)) + '%', width: Math.max(2, ((T(p.end) + DAY - T(p.start)) / span) * 100) + '%' },
-            },
-            h('div', { class: 'g-handle left', title: 'Tarik untuk ubah tanggal mulai' }),
-            h('div', { class: 'g-fill', style: { width: st.pct + '%' } }),
-            h('span', { class: 'g-bar-lbl' }, `${fmtShort(p.start)} – ${fmtShort(p.end)} (${dur}h)`),
-            h('span', { class: 'g-bar-pct' }, `${st.pct}%`),
-            h('div', { class: 'g-handle right', title: 'Tarik untuk ubah tanggal selesai' }));
+    const timeHead = h('div', {
+      class: 'g-time-head',
+      title: 'Tarik kiri/kanan (drag) atau scroll untuk stretch skala hari seperti chart',
+    },
+    h('div', { class: 'g-months' },
+      months.map((m) => h('span', { style: { left: pct(m.t) + '%' } }, m.label))),
+    h('div', { class: 'g-axis' },
+      ticks.map((k) => h('span', {
+        class: k.isToday ? 'is-today' : '',
+        style: { left: pct(k.t) + '%' },
+      }, k.label)),
+      showToday && stepDays > 1 && h('span', { class: 'today-flag', style: { left: pct(now) + '%' } }, 'Hari ini')));
 
-            trackEl.append(barEl);
-            attachBarDrag(barEl, trackEl, p, span);
+    const canvas = h('div', { class: 'g-canvas', style: { width: canvasWidthStyle } },
+      timeHead,
+      h('div', { class: 'g-grid' },
+        weekends.map((w) => h('div', { class: 'wknd', style: { left: pct(w.t) + '%', width: dayWidthPct + '%' } })),
+        ticks.map((k) => h('i', { class: k.major ? 'major' : '', style: { left: pct(k.t) + '%' } })),
+        showToday && h('div', { class: 'today-line', style: { left: pct(now + DAY * 0.5) + '%' } })));
 
-            return h('div', { class: 'g-row' },
-              h('div', { class: 'g-info' },
-                h('div', { class: 'g-info-main', onclick: () => jumpToPhase(p.id), title: 'Klik untuk lompat ke detail phase' },
-                  h('div', { class: 'g-name' }, p.name, p.locked ? ' 🔒' : ''),
-                  h('div', { class: 'g-dates' }, `${fmtShort(p.start)} – ${fmtShort(p.end)} · ${dur}h`)),
-                h('div', { class: 'g-quick' },
-                  h('button', { class: 'btn xs', title: 'Mundurkan 1 hari', onclick: () => adjustPhaseDates(p, -1, -1) }, '◀'),
-                  h('button', { class: 'btn xs', title: 'Majukan 1 hari', onclick: () => adjustPhaseDates(p, 1, 1) }, '▶'))),
-              trackEl);
-          }))));
+    const rowsWrap = h('div', { class: 'g-rows' });
+    ps.forEach((p) => {
+      const st = stats(p);
+      const dur = days(p);
+      const barEl = h('div', {
+        class: 'g-bar ' + p.status + (p.locked ? ' locked' : ''),
+        title: `${p.name} (${fmtShort(p.start)} – ${fmtShort(p.end)} · ${dur} hari)\nDrag untuk geser, tarik tepi untuk ubah durasi, klik 2x untuk edit`,
+        style: {
+          left: pct(T(p.start)) + '%',
+          width: Math.max(0.8, ((T(p.end) + DAY - T(p.start)) / span) * 100) + '%',
+        },
+      },
+      h('div', { class: 'g-handle left', title: 'Ubah tanggal mulai' }),
+      h('div', { class: 'g-fill', style: { width: st.pct + '%' } }),
+      h('span', { class: 'g-bar-lbl' }, `${p.name} · ${fmtShort(p.start)} – ${fmtShort(p.end)} (${dur}h)`),
+      h('span', { class: 'g-bar-pct' }, `${st.pct}%`),
+      h('div', { class: 'g-handle right', title: 'Ubah tanggal selesai' }));
+
+      attachBarDrag(barEl, canvas, p, span);
+      rowsWrap.append(h('div', { class: 'g-track-row' }, barEl));
+    });
+    canvas.append(rowsWrap);
+
+    const viewport = h('div', { class: 'g-viewport' }, canvas);
+
+    // 1. Drag pada Time Axis Header untuk stretch/compress skala hari (persis TradingView)
+    timeHead.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const startX = e.clientX;
+      const startPx = effectivePxPerDay;
+      const anchorRatio = (viewport.scrollLeft + (e.clientX - viewport.getBoundingClientRect().left)) / (canvas.getBoundingClientRect().width || 1);
+
+      function onMove(ev) {
+        const dx = ev.clientX - startX;
+        const factor = Math.exp(dx * 0.006);
+        const nextPx = Math.max(5, Math.min(110, Math.round(startPx * factor)));
+        if (nextPx !== ui.pxPerDay || ui.scaleMode === 'fit') {
+          ui.scaleMode = 'custom';
+          ui.pxPerDay = nextPx;
+          const newW = Math.max(vpEstWidth, Math.round(totalDays * nextPx));
+          ui.scrollLeft = Math.max(0, anchorRatio * newW - (ev.clientX - viewport.getBoundingClientRect().left));
+          render();
+        }
+      }
+      function onUp() {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        store.set('scaleMode', ui.scaleMode);
+        store.set('pxPerDay', String(ui.pxPerDay));
+      }
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+
+    // 2. Wheel zoom pada Time Axis (atau Ctrl/Alt + Wheel di area chart)
+    viewport.addEventListener('wheel', (e) => {
+      const onAxis = e.target.closest('.g-time-head');
+      if (!onAxis && !e.ctrlKey && !e.metaKey && !e.altKey) return;
+      if (Math.abs(e.deltaY) < Math.abs(e.deltaX)) return;
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left;
+      const oldW = canvas.getBoundingClientRect().width || 1;
+      const anchorRatio = (viewport.scrollLeft + cursorX) / oldW;
+
+      const factor = e.deltaY < 0 ? 1.15 : 0.87;
+      const nextPx = Math.max(5, Math.min(110, Math.round(effectivePxPerDay * factor)));
+      ui.scaleMode = 'custom';
+      ui.pxPerDay = nextPx;
+      store.set('scaleMode', 'custom');
+      store.set('pxPerDay', String(nextPx));
+      const newW = Math.max(vpEstWidth, Math.round(totalDays * nextPx));
+      ui.scrollLeft = Math.max(0, anchorRatio * newW - cursorX);
+      render();
+    }, { passive: false });
+
+    // 3. Drag-to-pan di area kosong chart
+    viewport.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || e.target.closest('.g-bar') || e.target.closest('.g-time-head')) return;
+      const startX = e.clientX;
+      const startScroll = viewport.scrollLeft;
+      viewport.classList.add('panning');
+      function onMove(ev) {
+        viewport.scrollLeft = startScroll - (ev.clientX - startX);
+        ui.scrollLeft = viewport.scrollLeft;
+      }
+      function onUp() {
+        viewport.classList.remove('panning');
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      }
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+
+    requestAnimationFrame(() => {
+      if (ui.scrollLeft > 0 && ui.scaleMode !== 'fit') viewport.scrollLeft = ui.scrollLeft;
+    });
+
+    const sidebar = h('div', { class: 'g-sidebar' },
+      h('div', { class: 'g-sidebar-head' },
+        h('span', {}, 'Phase'),
+        h('span', {}, `${ps.length}`)),
+      ps.map((p) => {
+        const dur = days(p);
+        return h('div', { class: 'g-side-row', onclick: () => jumpToPhase(p.id) },
+          h('div', { class: 'g-side-main' },
+            h('div', { class: 'g-side-name' },
+              h('span', { class: 'status-dot ' + p.status }),
+              h('span', {}, p.name),
+              p.locked && h('span', { class: 'muted small', title: 'Scope terkunci' }, '· Locked')),
+            h('div', { class: 'g-side-dates' }, `${fmtShort(p.start)} – ${fmtShort(p.end)} · ${dur}h`)),
+          h('div', { class: 'g-side-nudge', onclick: (e) => e.stopPropagation() },
+            h('button', { class: 'btn xs', title: 'Mundur 1 hari', onclick: () => adjustPhaseDates(p, -1, -1) }, '−1h'),
+            h('button', { class: 'btn xs', title: 'Maju 1 hari', onclick: () => adjustPhaseDates(p, 1, 1) }, '+1h')));
+      }));
+
+    return h('div', { class: 'gantt-outer' }, sidebar, viewport);
   }
 
-  // Siklus status task 1-klik langsung dari Timeline
-  const cycleTaskStatus = safe(async (t) => {
-    const idx = STATUSES.findIndex((s) => s[0] === t.status);
-    const nextStatus = STATUSES[(idx + 1) % STATUSES.length][0];
-    await mutate('POST', `/api/tasks/${t.id}/move`, { status: nextStatus });
-  });
-
-  const toggleTaskDone = safe(async (t) => {
-    const nextStatus = t.status === 'done' ? 'todo' : 'done';
-    await mutate('POST', `/api/tasks/${t.id}/move`, { status: nextStatus });
+  /* ======================= SCOPE ITEM & STATE SWITCHER (LINEAR MINIMAL) ======================= */
+  const setTaskStatus = safe(async (t, newStatus) => {
+    if (t.status === newStatus) return;
+    await mutate('POST', `/api/tasks/${t.id}/move`, { status: newStatus });
   });
 
   const deleteTaskQuick = safe(async (t) => {
-    if (!confirm(`Hapus item "${t.title}"?`)) return;
+    if (!confirm(`Hapus "${t.title}"?`)) return;
     await mutate('DELETE', `/api/tasks/${t.id}`);
   });
 
   function itemRow(t) {
     const over = t.due && t.status !== 'done' && t.due < todayStr();
-    return h('li', { class: t.status === 'done' ? 'is-done' : '' },
-      h('input', {
-        type: 'checkbox', class: 'item-check', checked: t.status === 'done',
-        title: t.status === 'done' ? 'Tandai belum selesai' : 'Tandai selesai (Done)',
-        onchange: () => toggleTaskDone(t),
-      }),
-      h('span', { class: 't', onclick: () => editTaskDialog(t), title: 'Klik untuk edit detail task' }, t.title),
-      t.origin === 'change' && badge('CR', 'cr'),
-      t.priority === 'high' && badge('Tinggi', 'prio-high'),
-      t.priority === 'medium' && badge('Sedang', 'prio-medium'),
-      t.due && badge(fmtShort(t.due), over ? 'over' : ''),
-      t.assignee && badge('👤 ' + t.assignee, ''),
-      h('button', {
-        type: 'button',
-        class: 'status-cycle ' + t.status,
-        title: 'Klik untuk ganti status (To Do → In Progress → Review → Done)',
-        onclick: () => cycleTaskStatus(t),
-      }, STATUS_LABEL[t.status]),
-      h('button', {
-        type: 'button', class: 'item-del', title: 'Hapus item',
-        onclick: () => deleteTaskQuick(t),
-      }, '×'));
+    return h('li', { class: 'scope-row' + (t.status === 'done' ? ' is-done' : '') },
+      h('div', { class: 'state-seg', role: 'group', 'aria-label': 'Status task' },
+        STATUSES.map(([stKey, stLabel]) =>
+          h('button', {
+            type: 'button',
+            class: t.status === stKey ? 'on' : '',
+            dataset: { st: stKey },
+            title: `Ubah ke ${stLabel}`,
+            onclick: () => setTaskStatus(t, stKey),
+          }, statusSvg(stKey), h('span', { class: 'st-txt' }, STATUS_SHORT[stKey])))),
+      h('span', { class: 'scope-title', onclick: () => editTaskDialog(t), title: 'Klik untuk edit detail' }, t.title),
+      h('div', { class: 'scope-meta' },
+        t.origin === 'change' && badge('CR', 'cr'),
+        t.priority === 'high' && badge('High', 'prio-high'),
+        t.due && badge(fmtShort(t.due), over ? 'over' : ''),
+        t.assignee && h('span', { class: 'scope-assignee' }, t.assignee),
+        h('button', {
+          type: 'button', class: 'scope-del', title: 'Hapus item',
+          onclick: () => deleteTaskQuick(t),
+        }, '×')));
   }
 
-  function itemsList(title, items) {
-    return h('div', { class: 'items' },
-      h('div', { class: 'items-head' }, h('h4', {}, `${title} (${items.length})`)),
-      items.length ? h('ul', {}, items.map(itemRow)) : h('p', { class: 'muted small' }, 'Belum ada item scope di phase ini.'));
-  }
-
-  function addItemInput(p) {
-    const titleIn = h('input', { name: 'title', placeholder: '+ Tambah item scope baru lalu tekan Enter…', maxlength: 200, 'aria-label': 'Tambah item scope' });
-    const prioIn = h('select', { name: 'priority', 'aria-label': 'Prioritas', title: 'Prioritas' },
-      PRIO_OPTIONS.map(([v, l]) => h('option', { value: v, selected: v === 'medium' }, 'Prio: ' + l)));
-    const picIn = h('input', { name: 'assignee', placeholder: 'PIC (opsional)', maxlength: 60, 'aria-label': 'PIC' });
-    const dueIn = h('input', { name: 'due', type: 'date', 'aria-label': 'Deadline', title: 'Deadline (opsional)' });
+  function addItemComposer(p) {
+    const titleIn = h('input', {
+      class: 'composer-title',
+      name: 'title',
+      placeholder: 'Tambah item scope baru… (tekan Enter)',
+      maxlength: 200,
+      'aria-label': 'Tambah item scope',
+    });
+    const prioIn = h('select', { class: 'composer-pill', name: 'priority', 'aria-label': 'Prioritas', title: 'Prioritas' },
+      PRIO_OPTIONS.map(([v, l]) => h('option', { value: v, selected: v === 'medium' }, l)));
+    const picIn = h('input', { class: 'composer-pill', name: 'assignee', placeholder: 'PIC', maxlength: 60, 'aria-label': 'PIC' });
+    const dueIn = h('input', { class: 'composer-pill', name: 'due', type: 'date', 'aria-label': 'Deadline', title: 'Deadline' });
 
     if (ui.refocus === p.id) { ui.refocus = null; requestAnimationFrame(() => titleIn.focus()); }
+
     return h('form', {
-      class: 'add-item',
+      class: 'scope-composer',
       onsubmit: safe(async (e) => {
         e.preventDefault();
         const title = titleIn.value.trim();
@@ -641,7 +781,14 @@
           due: dueIn.value,
         });
       }),
-    }, titleIn, prioIn, picIn, dueIn, h('button', { class: 'btn primary small', type: 'submit' }, '+ Tambah'));
+    },
+    h('span', { class: 'composer-plus' }, '+'),
+    titleIn,
+    h('div', { class: 'composer-extras' },
+      prioIn,
+      picIn,
+      dueIn,
+      h('button', { class: 'btn xs', type: 'submit' }, 'Tambah')));
   }
 
   function phaseCard(p) {
@@ -651,66 +798,63 @@
     const chg = items.filter((t) => t.origin === 'change');
 
     const statusSelect = h('select', {
-      class: 'status-select st-' + p.status,
+      class: 'phase-status-sel st-' + p.status,
       'aria-label': 'Status phase',
-      title: 'Ubah status phase langsung',
       onchange: safe(async (e) => {
         await mutate('PATCH', `/api/phases/${p.id}`, { ...p, status: e.target.value, cascade: false });
-        toast(`Status ${p.name} → ${PHASE_LABEL[e.target.value]}`);
       }),
     }, PHASE_OPTIONS.map(([v, l]) => h('option', { value: v, selected: v === p.status }, l)));
 
     return h('article', { class: 'panel phase ' + p.status, id: 'phase-' + p.id },
-      h('div', { class: 'phase-head' },
-        h('div', {},
-          h('div', { class: 'phase-title-row' },
-            h('h3', {}, p.name),
-            statusSelect,
-            p.locked && badge('🔒 Scope terkunci', 'lock')),
-          h('div', { class: 'phase-dates-bar' },
-            h('span', {}, `📅 ${fmt(p.start)} → ${fmt(p.end)} (${days(p)} hari)`),
-            h('span', { class: 'date-nudge', title: 'Geser jadwal phase' },
-              h('span', { class: 'small muted', style: { padding: '0 4px' } }, 'Geser:'),
-              h('button', { class: 'btn xs ghost', onclick: () => adjustPhaseDates(p, -1, -1), title: 'Mundurkan jadwal 1 hari' }, '-1h'),
-              h('button', { class: 'btn xs ghost', onclick: () => adjustPhaseDates(p, 1, 1), title: 'Majukan jadwal 1 hari' }, '+1h')),
-            h('span', { class: 'date-nudge', title: 'Ubah durasi (tanggal selesai)' },
-              h('span', { class: 'small muted', style: { padding: '0 4px' } }, 'Durasi:'),
-              h('button', { class: 'btn xs ghost', onclick: () => adjustPhaseDates(p, 0, -1), title: 'Kurangi durasi 1 hari' }, '-1h'),
-              h('button', { class: 'btn xs ghost', onclick: () => adjustPhaseDates(p, 0, 1), title: 'Perpanjang durasi 1 hari' }, '+1h'),
-              h('button', { class: 'btn xs ghost', onclick: () => adjustPhaseDates(p, 0, 7), title: 'Perpanjang durasi 1 minggu' }, '+1mgg')))),
-        h('div', { class: 'btns' },
-          h('button', { class: 'btn small', onclick: () => openPhaseInKanban(p.id), title: 'Buka papan Kanban untuk phase ini' }, 'Buka Kanban →'),
-          h('button', { class: 'btn small', onclick: () => phaseDialog(p) }, 'Edit Phase'),
-          h('button', { class: 'btn small', onclick: () => toggleLock(p), title: p.locked ? 'Buka kunci scope' : 'Setujui & kunci scope phase ini' }, p.locked ? '🔓 Buka kunci' : '🔒 Kunci scope'))),
-      p.goal && h('p', { class: 'goal' }, p.goal),
-      h('div', { class: 'progress-row' },
-        h('div', { class: 'progress' }, h('div', { style: { width: st.pct + '%' } })),
-        h('span', { class: 'muted small', style: { fontWeight: '600' } }, `${st.done}/${st.total} selesai (${st.pct}%)`)),
-      p.locked && h('p', { class: 'lock-note' }, `🔒 Disetujui ${fmt(p.approvedAt.slice(0, 10))} · ${p.baselineCount} item baseline. Tambahan item baru wajib lewat Change Request.`),
-      itemsList('Scope disetujui (klik status / centang untuk update cepat)', base),
-      chg.length ? itemsList('Perubahan masuk (CR)', chg) : null,
-      p.locked
-        ? h('div', { class: 'add-item' }, h('button', { class: 'btn small primary', onclick: () => crDialog(p.id) }, '+ Ajukan Change Request'))
-        : addItemInput(p));
+      h('div', { class: 'phase-top-bar' }, h('div', { style: { width: st.pct + '%' } })),
+      h('div', { class: 'phase-header' },
+        h('div', { class: 'phase-title-group' },
+          h('h3', {}, p.name),
+          statusSelect,
+          p.locked && badge('Locked', 'lock'),
+          h('div', { class: 'phase-meta-inline' },
+            h('span', {}, `${fmt(p.start)} – ${fmt(p.end)} (${days(p)}h)`),
+            h('span', {}, `· ${st.done}/${st.total} selesai (${st.pct}%)`))),
+        h('div', { class: 'phase-actions' },
+          h('button', { class: 'btn xs ghost', onclick: () => adjustPhaseDates(p, 0, -1), title: 'Kurangi durasi 1 hari' }, '−1h'),
+          h('button', { class: 'btn xs ghost', onclick: () => adjustPhaseDates(p, 0, 1), title: 'Tambah durasi 1 hari' }, '+1h'),
+          h('button', { class: 'btn small', onclick: () => openPhaseInKanban(p.id) }, 'Kanban →'),
+          h('button', { class: 'btn small', onclick: () => toggleLock(p) }, p.locked ? 'Buka Kunci' : 'Kunci Scope'),
+          h('button', { class: 'btn small ghost', onclick: () => phaseDialog(p) }, 'Edit'))),
+      p.goal && h('div', { class: 'phase-goal' }, p.goal),
+      p.locked && h('div', { class: 'phase-lock-banner' },
+        h('span', {}, `Baseline terkunci (${p.baselineCount} item · ${fmt(p.approvedAt.slice(0, 10))}). Permintaan baru wajib lewat Change Request.`),
+        h('button', { class: 'btn xs', onclick: () => crDialog(p.id) }, '+ Change Request')),
+      h('div', { class: 'scope-section-label' },
+        h('span', {}, `SCOPE (${base.length})`),
+        h('span', {}, 'STATUS · ITEM')),
+      base.length
+        ? h('ul', { class: 'scope-list' }, base.map(itemRow))
+        : h('div', { class: 'empty', style: { padding: '14px' } }, 'Belum ada item scope.'),
+      chg.length ? [
+        h('div', { class: 'scope-section-label' }, h('span', {}, `CHANGE REQUEST MASUK (${chg.length})`)),
+        h('ul', { class: 'scope-list' }, chg.map(itemRow)),
+      ] : null,
+      !p.locked && addItemComposer(p));
   }
 
+  /* ======================= CHANGE REQUEST PANEL ======================= */
   function crCard(c) {
     const ph = phaseById(c.phaseId);
     const nxt = ph ? nextPhaseOf(ph.id) : null;
     return h('div', { class: 'cr' },
       h('h4', {}, c.title),
-      h('div', { class: 'meta' }, `${c.requestedBy ? 'Dari ' + c.requestedBy + ' · ' : ''}saat ${ph ? ph.name : c.phaseName} · ${fmt(c.createdAt.slice(0, 10))}`),
+      h('div', { class: 'meta' }, `${c.requestedBy ? c.requestedBy + ' · ' : ''}${ph ? ph.name : c.phaseName} · ${fmtShort(c.createdAt.slice(0, 10))}`),
       c.desc && h('p', {}, c.desc),
-      c.reason && h('p', { class: 'why muted' }, 'Alasan/dampak: ' + c.reason),
+      c.reason && h('p', { class: 'why muted' }, 'Dampak: ' + c.reason),
       h('div', { class: 'btns' },
-        ph && h('button', { class: 'btn small primary', onclick: () => decideDialog(c, 'current'), title: 'Masuk phase sekarang karena wajib' }, `Wajib: ${ph.name}`),
+        ph && h('button', { class: 'btn xs primary', onclick: () => decideDialog(c, 'current') }, `Masuk ${ph.name}`),
         h('button', {
-          class: 'btn small', disabled: !nxt, onclick: () => decideDialog(c, 'next'),
-          title: nxt ? 'Masuk phase berikutnya' : 'Belum ada phase berikutnya — buat dulu di Timeline',
-        }, nxt ? `Geser ke ${nxt.name}` : 'Geser (belum ada phase)'),
-        h('button', { class: 'btn small danger', onclick: () => decideDialog(c, 'reject') }, 'Tolak'),
+          class: 'btn xs', disabled: !nxt, onclick: () => decideDialog(c, 'next'),
+        }, nxt ? `Geser ke ${nxt.name}` : 'Geser (buat phase dulu)'),
+        h('button', { class: 'btn xs danger', onclick: () => decideDialog(c, 'reject') }, 'Tolak'),
         h('button', {
-          class: 'btn small ghost', title: 'Tarik / hapus permintaan',
+          class: 'btn xs ghost', title: 'Hapus',
           onclick: safe(async () => { if (confirm('Hapus permintaan ini?')) await mutate('DELETE', `/api/changes/${c.id}`); }),
         }, '×')));
   }
@@ -718,11 +862,11 @@
   function crDone(c) {
     let outcome;
     if (c.status === 'rejected') outcome = 'Ditolak';
-    else if (c.decision === 'current') outcome = `Masuk ${c.decidedPhaseName} (wajib${c.extendDays ? `, +${c.extendDays} hari` : ''})`;
+    else if (c.decision === 'current') outcome = `Masuk ${c.decidedPhaseName}${c.extendDays ? ` (+${c.extendDays}h)` : ''}`;
     else outcome = `Digeser ke ${c.decidedPhaseName}`;
     return h('div', { class: 'cr done' },
       h('h4', {}, c.title),
-      h('div', { class: 'meta' }, `${outcome}${c.decidedAt ? ' · ' + fmt(c.decidedAt.slice(0, 10)) : ''}`),
+      h('div', { class: 'meta' }, `${outcome}${c.decidedAt ? ' · ' + fmtShort(c.decidedAt.slice(0, 10)) : ''}`),
       c.decisionNote && h('p', { class: 'why muted' }, c.decisionNote));
   }
 
@@ -730,29 +874,49 @@
     const pending = S.changes.filter((c) => c.status === 'pending');
     const decided = S.changes.filter((c) => c.status !== 'pending').sort((a, b) => (b.decidedAt || '').localeCompare(a.decidedAt || ''));
     return h('aside', { class: 'panel changes' },
-      h('div', { class: 'panel-head' }, h('h2', {}, `Change Request${pending.length ? ` (${pending.length})` : ''}`), h('button', { class: 'btn small', onclick: () => crDialog() }, '+ Ajukan')),
-      pending.length ? pending.map(crCard) : h('p', { class: 'empty' }, 'Tidak ada perubahan yang menunggu keputusan.'),
+      h('div', { class: 'panel-head' },
+        h('h2', {}, `Change Requests${pending.length ? ` (${pending.length})` : ''}`),
+        h('button', { class: 'btn xs', onclick: () => crDialog() }, '+ Ajukan')),
+      pending.length ? pending.map(crCard) : h('p', { class: 'empty' }, 'Tidak ada antrean perubahan.'),
       decided.length ? h('details', {}, h('summary', {}, `Riwayat keputusan (${decided.length})`), decided.map(crDone)) : null);
   }
 
   function timelineView() {
     const ps = phases();
+    const totalTasks = S.tasks.length;
+    const doneTasks = S.tasks.filter((t) => t.status === 'done').length;
+    const pct = totalTasks ? Math.round((doneTasks / totalTasks) * 100) : 0;
+
     return h('div', { class: 'wrap' },
-      h('section', { class: 'panel' },
-        h('div', { class: 'panel-head' },
-          h('h2', {}, 'Timeline & Gantt Phase'),
-          h('div', { class: 'head-controls' },
-            h('label', { class: 'cascade-toggle', title: 'Jika aktif, menggeser atau memperpanjang phase akan otomatis menggeser phase berikutnya' },
+      h('section', { class: 'panel chart-panel' },
+        h('div', { class: 'chart-toolbar' },
+          h('div', { class: 'chart-title-group' },
+            h('h2', {}, 'Timeline'),
+            ps.length ? h('div', { class: 'chart-metrics' },
+              h('span', {}, `${ps.length} Phase`),
+              h('span', {}, `${doneTasks}/${totalTasks} selesai (${pct}%)`),
+              h('span', {}, `${days({ start: ps[0].start, end: ps[ps.length - 1].end })} hari total`)) : null),
+          h('div', { class: 'chart-controls' },
+            h('label', { class: 'cascade-switch', title: 'Geser phase berikutnya otomatis saat jadwal berubah' },
               h('input', {
                 type: 'checkbox', checked: ui.cascade,
                 onchange: (e) => { ui.cascade = e.target.checked; store.set('cascade', ui.cascade ? '1' : '0'); },
               }),
-              '🔗 Auto-geser phase berikutnya'),
-            h('button', { class: 'btn primary small', onclick: () => phaseDialog() }, '+ Buat Phase'))),
-        summaryStrip(ps),
-        ps.length ? gantt(ps) : h('div', { class: 'empty' },
-          h('p', { style: { marginBottom: '10px' } }, 'Belum ada phase di database. Buat phase pertama untuk memulai timeline.'),
-          h('button', { class: 'btn primary', onclick: () => phaseDialog() }, '+ Buat Phase Pertama'))),
+              'Auto-cascade'),
+            h('div', { class: 'seg-group', title: 'Resolusi skala timeline' },
+              h('button', { class: ui.scaleMode === '1d' ? 'on' : '', onclick: () => setScalePreset('1d', 44) }, '1H'),
+              h('button', { class: ui.scaleMode === '3d' ? 'on' : '', onclick: () => setScalePreset('3d', 20) }, '2H'),
+              h('button', { class: ui.scaleMode === '1w' ? 'on' : '', onclick: () => setScalePreset('1w', 10) }, '1M'),
+              h('button', { class: ui.scaleMode === 'fit' ? 'on' : '', onclick: () => setScalePreset('fit') }, 'Penuh')),
+            h('button', { class: 'btn primary small', onclick: () => phaseDialog() }, '+ Phase'))),
+        ps.length ? [
+          ganttChart(ps),
+          h('div', { class: 'chart-foot' },
+            h('span', {}, 'Tarik header tanggal kiri/kanan untuk stretch skala waktu (1 hari penuh s/d bulanan) · Geser bar untuk ubah jadwal'),
+            h('span', {}, ui.scaleMode === 'fit' ? 'Skala: Penuh (Fit)' : `Zoom: ${ui.pxPerDay}px / hari`)),
+        ] : h('div', { class: 'empty' },
+          h('p', { style: { marginBottom: '10px' } }, 'Belum ada phase.'),
+          h('button', { class: 'btn primary small', onclick: () => phaseDialog() }, '+ Buat Phase Pertama'))),
       ps.length ? h('div', { class: 'split' }, h('div', { class: 'phases' }, ps.map(phaseCard)), changePanel()) : null);
   }
 
@@ -794,7 +958,7 @@
     h('div', { class: 'tt' }, t.title),
     h('div', { class: 'tmeta' },
       t.origin === 'change' && badge('CR', 'cr'),
-      t.priority === 'high' && badge('Tinggi', 'prio-high'),
+      t.priority === 'high' && badge('High', 'prio-high'),
       t.due && badge(fmtShort(t.due), over ? 'over' : ''),
       t.assignee && h('span', { class: 'avatar', title: t.assignee }, initials(t.assignee))),
     h('div', { class: 'mv' }, idx > 0 && mv(idx - 1, '←'), idx < STATUSES.length - 1 && mv(idx + 1, '→')));
@@ -819,7 +983,10 @@
       if (id) moveTask(id, sid, i);
     });
     return h('section', { class: 'col' },
-      h('div', { class: 'col-head' }, label, h('span', { class: 'count' }, ts.length),
+      h('div', { class: 'col-head' },
+        statusSvg(sid),
+        h('span', {}, label),
+        h('span', { class: 'count' }, ts.length),
         h('button', { title: ph.locked ? 'Ajukan perubahan' : 'Tambah task', onclick: () => taskDialog(ph, sid) }, '+')),
       body);
   }
@@ -842,8 +1009,8 @@
     const ps = phases();
     if (!ps.length) {
       return h('div', { class: 'panel empty' },
-        h('p', { style: { marginBottom: '10px' } }, 'Belum ada phase. Buat phase dulu untuk mulai mengelola Kanban.'),
-        h('button', { class: 'btn primary', onclick: () => phaseDialog() }, '+ Buat Phase'));
+        h('p', { style: { marginBottom: '10px' } }, 'Belum ada phase.'),
+        h('button', { class: 'btn primary small', onclick: () => phaseDialog() }, '+ Buat Phase'));
     }
     const ph = ps.find((p) => p.id === ui.phaseId) || currentPhase();
     return h('div', {},
@@ -851,21 +1018,21 @@
         h('select', {
           'aria-label': 'Pilih phase',
           onchange: (e) => { ui.phaseId = e.target.value; store.set('phaseId', ui.phaseId); render(); },
-        }, ps.map((p) => h('option', { value: p.id, selected: p.id === ph.id }, p.name + (p.status === 'active' ? ' (berjalan)' : p.status === 'done' ? ' (selesai)' : '')))),
-        h('span', { class: 'muted' }, `📅 ${fmt(ph.start)} → ${fmt(ph.end)} (${days(ph)} hari)`),
-        ph.locked && badge('🔒 Scope terkunci', 'lock'),
-        h('button', { class: 'btn small', onclick: () => { ui.view = 'timeline'; store.set('view', 'timeline'); render(); setTimeout(() => jumpToPhase(ph.id), 50); } }, '← Lihat di Timeline'),
+        }, ps.map((p) => h('option', { value: p.id, selected: p.id === ph.id }, p.name + (p.status === 'active' ? ' · Berjalan' : p.status === 'done' ? ' · Selesai' : '')))),
+        h('span', { class: 'muted small' }, `${fmt(ph.start)} – ${fmt(ph.end)} (${days(ph)}h)`),
+        ph.locked && badge('Locked', 'lock'),
+        h('button', { class: 'btn small ghost', onclick: () => { ui.view = 'timeline'; store.set('view', 'timeline'); render(); setTimeout(() => jumpToPhase(ph.id), 40); } }, '← Timeline'),
         h('input', {
-          type: 'search', placeholder: 'Cari task…', value: ui.q, 'aria-label': 'Cari task',
+          type: 'search', placeholder: 'Filter task…', value: ui.q, 'aria-label': 'Filter task',
           oninput: (e) => { ui.q = e.target.value; applyFilter(); },
         }),
         ph.locked
-          ? h('button', { class: 'btn', onclick: () => crDialog(ph.id), title: 'Scope terkunci, tambahan harus lewat change request' }, '+ Ajukan perubahan')
-          : h('button', { class: 'btn primary', onclick: () => taskDialog(ph) }, '+ Task')),
+          ? h('button', { class: 'btn small', onclick: () => crDialog(ph.id) }, '+ Change Request')
+          : h('button', { class: 'btn primary small', onclick: () => taskDialog(ph) }, '+ Task')),
       h('div', { class: 'board' }, STATUSES.map((s) => column(ph, s))));
   }
 
-  /* ======================= render & init ======================= */
+  /* ======================= RENDER & INIT ======================= */
   function render() {
     const y = window.scrollY;
     $('#app').replaceChildren(ui.view === 'kanban' ? kanbanView() : timelineView());
@@ -909,7 +1076,6 @@
     dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
     document.addEventListener('dragend', () => { dragging = false; dragId = null; clearDrop(); }, true);
 
-    // sinkronisasi ringan jika ada orang lain yang mengubah data
     setInterval(async () => {
       if (document.hidden || dragging || dlg.open) return;
       const a = document.activeElement;
@@ -917,7 +1083,7 @@
       try {
         const r = await api('GET', '/api/rev');
         if (r.rev !== S.rev) { S = await api('GET', '/api/state'); render(); }
-      } catch (_) { /* coba lagi di putaran berikutnya */ }
+      } catch (_) { /* abaikan */ }
     }, 15000);
 
     api('GET', '/api/state').then((d) => { S = d; render(); }).catch((e) => {
