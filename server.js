@@ -71,6 +71,7 @@ class HttpError extends Error {
 const bad = (m) => new HttpError(400, m);
 const conflict = (m) => new HttpError(409, m);
 const notFound = (m) => new HttpError(404, m);
+const forbidden = (m) => new HttpError(403, m);
 
 /* ---------- util ---------- */
 const uid = () => crypto.randomBytes(4).toString('hex');
@@ -136,13 +137,21 @@ function normalize(d) {
         by: str(b.by, 60) || 'tim',
         ts: typeof b.ts === 'string' ? b.ts : now(),
       }));
+    let assignees = [];
+    if (Array.isArray(t.assignees)) {
+      assignees = t.assignees.map((x) => str(x, 60)).filter(Boolean);
+    } else if (typeof t.assignee === 'string' && t.assignee.trim()) {
+      assignees = t.assignee.split(/[,;]+/).map((x) => str(x.trim(), 60)).filter(Boolean);
+    }
     return {
       id: String(t.id), phaseId: t.phaseId, title: str(t.title, 200), desc: str(t.desc, 4000),
       blockers,
       links, comments,
       status: TASK_STATUS.includes(t.status) ? t.status : 'todo',
       priority: PRIORITY.includes(t.priority) ? t.priority : 'medium',
-      assignee: str(t.assignee, 60), due: isDate(t.due) ? t.due : '',
+      assignees,
+      assignee: assignees.join(', '),
+      due: isDate(t.due) ? t.due : '',
       origin: t.origin === 'change' ? 'change' : 'baseline', crId: t.crId || null,
       createdAt: t.createdAt || now(), updatedAt: t.updatedAt || now(),
       order: Number.isFinite(t.order) ? t.order : i,
@@ -346,12 +355,27 @@ function taskFields(b, base = {}) {
   } else if (typeof b.blocker === 'string') {
     blockers = b.blocker.trim() ? [{ id: uid(), text: str(b.blocker, 500), by: 'tim', ts: now() }] : [];
   }
+  let assignees;
+  if (Array.isArray(b.assignees)) {
+    assignees = b.assignees.map((x) => str(x, 60)).filter(Boolean);
+  } else if (typeof b.assignee === 'string') {
+    assignees = b.assignee ? b.assignee.split(/[,;]+/).map((x) => str(x.trim(), 60)).filter(Boolean) : [];
+  } else if (base.assignees && Array.isArray(base.assignees)) {
+    assignees = base.assignees.map((x) => str(x, 60)).filter(Boolean);
+  } else if (base.assignee) {
+    assignees = base.assignee.split(/[,;]+/).map((x) => str(x.trim(), 60)).filter(Boolean);
+  } else {
+    assignees = [];
+  }
+  const assignee = assignees.join(', ');
   return {
     title, desc: str(m.desc, 4000),
     blockers,
     links, comments,
     priority: PRIORITY.includes(m.priority) ? m.priority : 'medium',
-    assignee: str(m.assignee, 60), due: isDate(m.due) ? m.due : '',
+    assignees,
+    assignee,
+    due: isDate(m.due) ? m.due : '',
   };
 }
 
@@ -405,6 +429,7 @@ route('GET', '/api/export', () => ({
 }));
 
 route('POST', '/api/import', ({ body, user }) => {
+  if (user !== 'admin') throw forbidden('Hanya akun admin yang memiliki izin untuk restore/import database');
   let nd;
   try { nd = normalize(body); } catch (e) { throw bad('File backup tidak valid: ' + e.message); }
   backupNow();
@@ -415,6 +440,7 @@ route('POST', '/api/import', ({ body, user }) => {
 });
 
 route('POST', '/api/reset', ({ body, user }) => {
+  if (user !== 'admin') throw forbidden('Hanya akun admin yang memiliki izin untuk reset / clear database');
   backupNow();
   const rev = db.rev;
   if (body && body.mode === 'seed') {

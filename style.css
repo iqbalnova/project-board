@@ -114,6 +114,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .btn.ghost:hover:not([disabled]) { background: var(--panel-subtle); border-color: transparent; }
 .btn.small { padding: 3px 9px; font-size: 12px; border-radius: 5px; }
 .btn.xs { padding: 2px 6px; font-size: 11px; border-radius: 4px; }
+.btn.icon-only { width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.btn.icon-only svg { display: block; }
 .btn[disabled] { opacity: .4; cursor: not-allowed; }
 
 /* ======================= LAYOUT ======================= */
@@ -140,7 +142,18 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .badge.prio-high { color: var(--bad); background: var(--bad-bg); border-color: transparent; }
 .badge.prio-medium { color: var(--text-sec); background: var(--panel-subtle); border-color: transparent; }
 .badge.prio-low { color: var(--muted); background: transparent; border-color: transparent; }
-.badge.over { color: var(--bad); background: var(--bad-bg); border-color: color-mix(in srgb, var(--bad) 25%, transparent); }
+.badge.over {
+  color: #b91c1c;
+  background: #fee2e2;
+  border-color: #f87171;
+  font-weight: 600;
+}
+body.dark .badge.over {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.22);
+  border-color: rgba(239, 68, 68, 0.5);
+  font-weight: 600;
+}
 
 /* ======================= CRYPTO-STYLE TIMELINE CHART ======================= */
 .chart-panel { overflow: hidden; }
@@ -431,6 +444,77 @@ select.phase-status-sel.st-done { color: var(--done); background-color: var(--do
 .prop-item { display: grid; gap: 3px; }
 .prop-item > span { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
 .prop-item select, .prop-item input { padding: 4px 7px; font-size: 12px; height: 28px; border-radius: 5px; }
+.prop-item input.due-over-input { border-color: #f87171; color: #b91c1c; background: #fef2f2; }
+body.dark .prop-item input.due-over-input { border-color: rgba(239, 68, 68, 0.5); color: #fca5a5; background: rgba(239, 68, 68, 0.15); }
+
+/* Multi-PIC Pills in Property Grid */
+.prop-pics-full {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line);
+}
+.prop-hdr {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.pic-pills-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pic-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 3px 4px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text-sec);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: all .12s ease;
+  user-select: none;
+}
+.pic-pill:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+  background: var(--panel-subtle);
+}
+.pic-pill.is-active {
+  background: var(--active-bg);
+  border-color: color-mix(in srgb, var(--active) 40%, var(--line));
+  color: var(--active);
+  font-weight: 600;
+}
+.pic-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--panel-subtle);
+  border: 1px solid var(--line);
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text);
+}
+.pic-pill.is-active .pic-avatar {
+  background: var(--active);
+  border-color: transparent;
+  color: #fff;
+}
+.pic-chk {
+  font-size: 10px;
+  font-weight: 750;
+  margin-left: 1px;
+}
 
 /* Multi-Blocker List in Detail Sheet */
 .blocker-list {
@@ -742,6 +826,24 @@ dialog:has(.wide) { width: min(640px, calc(100vw - 24px)); }
 .tt { font-weight: 500; font-size: 13px; word-break: break-word; }
 .tmeta { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 7px; }
 .tmeta:empty { display: none; }
+.card-avatars {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+.card-avatars .avatar {
+  margin-left: -5px;
+  border: 1.5px solid var(--panel);
+  position: relative;
+  transition: transform .12s ease;
+}
+.card-avatars .avatar:first-child {
+  margin-left: 0;
+}
+.card-avatars .avatar:hover {
+  transform: translateY(-2px) scale(1.08);
+  z-index: 3;
+}
 .avatar {
   margin-left: auto; width: 20px; height: 20px; border-radius: 50%; background: var(--panel-subtle);
   border: 1px solid var(--line); color: var(--text-sec);

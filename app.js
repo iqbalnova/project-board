@@ -37,21 +37,37 @@
   let dragId = null;
 
   /* ======================= TEMA ======================= */
+  const SUN_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>';
+  const MOON_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+
   function applyTheme() {
     document.documentElement.dataset.theme = ui.theme;
     const btn = document.getElementById('btn-theme');
-    if (btn) btn.textContent = ui.theme === 'dark' ? 'Dark' : 'Light';
+    if (btn) {
+      const isDark = ui.theme === 'dark';
+      btn.innerHTML = isDark ? SUN_ICON : MOON_ICON;
+      btn.title = isDark ? 'Mode Gelap (Klik untuk beralih ke Mode Terang)' : 'Mode Terang (Klik untuk beralih ke Mode Gelap)';
+      btn.setAttribute('aria-label', btn.title);
+    }
   }
 
   function updateUserButton() {
     const btn = document.getElementById('btn-user');
-    if (!btn) return;
-    if (ui.needLogin) {
-      btn.textContent = 'Login';
-      return;
+    const btnReset = document.getElementById('btn-reset');
+    const u = (S.me && S.me.user) || '';
+    const isAdmin = u === 'admin';
+
+    if (btn) {
+      if (ui.needLogin) {
+        btn.textContent = 'Login';
+      } else {
+        btn.textContent = u || 'admin';
+      }
     }
-    const u = (S.me && S.me.user) || 'admin';
-    btn.textContent = u;
+
+    if (btnReset) {
+      btnReset.style.display = (!ui.needLogin && isAdmin) ? '' : 'none';
+    }
   }
 
   /* ======================= UTIL DOM & SVG ======================= */
@@ -141,6 +157,13 @@
   }
   const initials = (n) => (n || '?').split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
   const blockersOf = (t) => Array.isArray(t.blockers) ? t.blockers : (t.blocker ? [{ id: 'legacy', text: t.blocker, by: 'tim' }] : []);
+  const assigneesOf = (t) => {
+    if (Array.isArray(t.assignees) && t.assignees.length) return t.assignees.filter(Boolean);
+    if (typeof t.assignee === 'string' && t.assignee.trim()) {
+      return t.assignee.split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
+    }
+    return [];
+  };
 
   function envUsers() {
     const list = (S.me && Array.isArray(S.me.users) && S.me.users.length) ? S.me.users : ['admin'];
@@ -231,7 +254,7 @@
     setTimeout(() => uIn.focus(), 0);
     return h('div', { class: 'panel login-wrap' },
       h('h2', {}, 'Login Project Board'),
-      h('p', {}, 'Masukkan akun yang terdaftar di environment variable APP_USERS.'),
+      h('p', {}, 'Silakan masuk dengan akun Anda untuk mengakses board.'),
       form);
   }
 
@@ -281,8 +304,8 @@
       h('div', { class: 'dlg-in' },
         h('h2', {}, `User Aktif: ${me}`),
         h('p', { class: 'intro' }, authReq
-          ? 'Multi-user aktif dari environment variable APP_USERS. Komentar dan riwayat otomatis memakai nama akun ini.'
-          : 'Ganti nama user aktif agar komentar di card tercatat atas namamu. (Untuk mengaktifkan password multi-user, isi APP_USERS=user1:pass1,user2:pass2 di .env).'),
+          ? 'Komentar dan riwayat aktivitas otomatis tercatat atas nama akun ini.'
+          : 'Ganti nama user aktif agar komentar dan riwayat tercatat atas namamu.'),
         form));
     dlg.showModal();
   }
@@ -409,6 +432,29 @@
     });
 
     // Properties Grid (PIC dropdown dari env users)
+    const curAssignees = assigneesOf(t);
+    const allUsers = Array.from(new Set([...envUsers(), ...curAssignees]));
+    const isDueOrOver = t.due && t.status !== 'done' && t.due <= todayStr();
+
+    const picPills = h('div', { class: 'pic-pills-wrap' },
+      allUsers.map((u) => {
+        const isSelected = curAssignees.includes(u);
+        return h('button', {
+          type: 'button',
+          class: 'pic-pill' + (isSelected ? ' is-active' : ''),
+          title: isSelected ? `Klik untuk mencabut ${u}` : `Klik untuk menugaskan ${u}`,
+          onclick: () => {
+            const next = isSelected
+              ? curAssignees.filter((x) => x !== u)
+              : [...curAssignees, u];
+            patchField({ assignees: next, assignee: next.join(', ') });
+          },
+        },
+        h('span', { class: 'pic-avatar' }, initials(u)),
+        h('span', { class: 'pic-name' }, u),
+        isSelected && h('span', { class: 'pic-chk' }, '✓'));
+      }));
+
     const propGrid = h('div', { class: 'prop-grid' },
       h('label', { class: 'prop-item' },
         h('span', {}, 'Status'),
@@ -423,15 +469,15 @@
         h('select', { onchange: (e) => patchField({ phaseId: e.target.value }) },
           phases().map((p) => h('option', { value: p.id, selected: p.id === t.phaseId }, p.name + (p.locked ? ' (Locked)' : ''))))),
       h('label', { class: 'prop-item' },
-        h('span', {}, 'PIC'),
-        h('select', { onchange: (e) => patchField({ assignee: e.target.value }) },
-          picOptions(t.assignee).map(([v, l]) => h('option', { value: v, selected: v === (t.assignee || '') }, l)))),
-      h('label', { class: 'prop-item' },
-        h('span', {}, 'Deadline'),
+        h('span', {}, 'Deadline' + (isDueOrOver ? ' (Lewat / Hari H)' : '')),
         h('input', {
           type: 'date', value: t.due || '',
+          class: isDueOrOver ? 'due-over-input' : '',
           onchange: (e) => patchField({ due: e.target.value }),
-        })));
+        })),
+      h('div', { class: 'prop-pics-full' },
+        h('span', { class: 'prop-hdr' }, `PIC / Assignee (${curAssignees.length ? curAssignees.join(', ') : 'Belum dipilih - klik untuk assign'})`),
+        picPills));
 
     // 1. DESKRIPSI (Di paling atas setelah properti)
     const descIn = h('textarea', {
@@ -451,7 +497,7 @@
         h('div', { class: 'small muted', style: { marginBottom: '4px', fontWeight: '600' } }, 'Link Aktif di Deskripsi:'),
         renderLinkedText(t.desc)));
 
-    // 2. LINK DOKUMEN (Section tersendiri)
+    // 2. LINK DOKSLI (Section tersendiri)
     const lTitleIn = h('input', { name: 'ltitle', placeholder: 'Label (mis: Figma / API Spec / PRD)', maxlength: 120 });
     const lUrlIn = h('input', { name: 'lurl', placeholder: 'https://...', maxlength: 1000 });
     const addLinkForm = h('form', {
@@ -468,7 +514,7 @@
 
     const linksSec = h('div', { class: 'ws-section' },
       h('div', { class: 'ws-head' },
-        h('span', {}, `LINK DOKUMEN (${links.length})`)),
+        h('span', {}, `LINK DOKSLI (${links.length})`)),
       links.length > 0 && h('div', { class: 'links-list' },
         links.map((l, idx) => h('div', { class: 'link-card' },
           h('a', { href: l.url, target: '_blank', rel: 'noopener noreferrer' }, `${l.title} ↗`),
@@ -651,6 +697,10 @@
   }
 
   function resetDialog() {
+    const me = (S.me && S.me.user) || '';
+    if (me !== 'admin') {
+      return toast('Akses ditolak: Hanya akun admin yang dapat melakukan Clear DB', true);
+    }
     const dlg = $('#dlg');
     const doReset = safe(async (mode, msg) => {
       closeTaskDrawer();
@@ -659,21 +709,46 @@
       toast(msg);
     });
 
+    const confirmAction = (mode, actionTitle, warningMsg, btnLabel) => {
+      dlg.replaceChildren(
+        h('div', { class: 'dlg-in' },
+          h('h2', { style: { color: 'var(--bad)', display: 'flex', alignItems: 'center', gap: '8px' } },
+            '⚠️ Konfirmasi: ' + actionTitle),
+          h('p', { class: 'intro', style: { color: 'var(--text)' } },
+            'Tindakan ini memerlukan konfirmasi keamanan admin.'),
+          h('div', { class: 'form-err', style: { margin: '14px 0', lineHeight: '1.5' } },
+            h('strong', {}, warningMsg),
+            h('div', { class: 'small', style: { marginTop: '4px' } }, 'Semua data aktif yang dihapus tidak dapat dipulihkan secara otomatis.')),
+          h('div', { class: 'actions' },
+            h('button', { type: 'button', class: 'btn', onclick: () => resetDialog() }, 'Batal'),
+            h('button', {
+              type: 'button',
+              class: 'btn danger',
+              onclick: () => doReset(mode, actionTitle + ' berhasil'),
+            }, btnLabel))));
+    };
+
     dlg.replaceChildren(
       h('div', { class: 'dlg-in' },
-        h('h2', {}, 'Clear Database'),
+        h('h2', {}, 'Clear Database (Khusus Admin)'),
         h('p', { class: 'intro' }, 'Pilih mode pembersihan data. File backup (.bak) tetap tersimpan otomatis di server.'),
         h('div', { class: 'reset-cards' },
           h('div', { class: 'reset-card' },
             h('div', {},
               h('h4', {}, 'Kosongkan Semua (0 Phase)'),
               h('p', {}, 'Hapus seluruh phase, task, change request, dan riwayat.')),
-            h('button', { class: 'btn danger small', onclick: () => doReset('empty', 'Database dikosongkan') }, 'Kosongkan')),
+            h('button', {
+              class: 'btn danger small',
+              onclick: () => confirmAction('empty', 'Kosongkan Database', 'PERINGATAN: Seluruh phase, ticket/card, komentar, dan riwayat akan dihapus total (0 item)!', 'Ya, Kosongkan Database'),
+            }, 'Kosongkan…')),
           h('div', { class: 'reset-card' },
             h('div', {},
               h('h4', {}, 'Reset ke Awal (Phase 1)'),
               h('p', {}, 'Hapus data lama dan buat Phase 1 baru mulai hari ini.')),
-            h('button', { class: 'btn primary small', onclick: () => doReset('seed', 'Database di-reset ke Phase 1') }, 'Reset Phase 1'))),
+            h('button', {
+              class: 'btn primary small',
+              onclick: () => confirmAction('seed', 'Reset ke Phase 1', 'Data lama akan digantikan dengan template default Phase 1.', 'Ya, Reset ke Phase 1'),
+            }, 'Reset Phase 1…'))),
         h('div', { class: 'actions' },
           h('button', { class: 'btn', onclick: () => dlg.close() }, 'Batal'))));
     dlg.showModal();
@@ -732,11 +807,14 @@
         { name: 'title', label: 'Judul Scope / Ticket', required: true, maxlength: 200 },
         { name: 'desc', label: 'Deskripsi', type: 'textarea', maxlength: 4000, placeholder: 'Tulis deskripsi atau catatan spesifikasi...' },
         { name: 'priority', label: 'Prioritas', type: 'select', options: PRIO_OPTIONS, value: 'medium' },
-        { name: 'assignee', label: 'PIC', type: 'select', options: picOptions(''), value: '' },
+        { name: 'assignee', label: 'PIC (bisa lebih dari satu, pisahkan koma)', placeholder: 'Contoh: meisy, zudev' },
         { name: 'due', label: 'Deadline', type: 'date' },
       ],
       submit: 'Tambah',
-      onSubmit: (v) => mutate('POST', '/api/tasks', { phaseId: ph.id, status, ...v }),
+      onSubmit: (v) => {
+        const assignees = (v.assignee || '').split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
+        return mutate('POST', '/api/tasks', { phaseId: ph.id, status, ...v, assignees });
+      },
     });
   }
 
@@ -1150,10 +1228,11 @@
   });
 
   function itemRow(t) {
-    const over = t.due && t.status !== 'done' && t.due < todayStr();
+    const over = t.due && t.status !== 'done' && t.due <= todayStr();
     const linksCount = (t.links || []).length;
     const commentsCount = (t.comments || []).length;
     const bCount = blockersOf(t).length;
+    const pics = assigneesOf(t);
 
     return h('li', { class: 'scope-row' + (t.status === 'done' ? ' is-done' : '') + (bCount ? ' has-blocker' : '') },
       h('div', { class: 'scope-row-main' },
@@ -1178,7 +1257,7 @@
           t.origin === 'change' && badge('CR', 'cr'),
           t.priority === 'high' && badge('High', 'prio-high'),
           t.due && badge(fmtShort(t.due), over ? 'over' : ''),
-          t.assignee && h('span', { class: 'scope-assignee' }, t.assignee),
+          pics.length > 0 && h('span', { class: 'scope-assignee', title: `PIC: ${pics.join(', ')}` }, pics.join(', ')),
           h('button', {
             type: 'button', class: 'scope-del', title: 'Hapus item',
             onclick: (e) => { e.stopPropagation(); deleteTaskQuick(t); },
@@ -1213,6 +1292,7 @@
           title,
           priority: prioIn.value,
           assignee: picIn.value,
+          assignees: picIn.value ? [picIn.value] : [],
           due: dueIn.value,
         });
       }),
@@ -1390,7 +1470,7 @@
   }
 
   /* ======================= KANBAN ======================= */
-  const taskText = (t) => `${t.title} ${t.assignee} ${t.desc} ${blockersOf(t).map((b) => b.text).join(' ')}`.toLowerCase();
+  const taskText = (t) => `${t.title} ${assigneesOf(t).join(' ')} ${t.desc} ${blockersOf(t).map((b) => b.text).join(' ')}`.toLowerCase();
   const moveTask = safe((id, status, index) => mutate('POST', `/api/tasks/${id}/move`, { status, index }));
 
   function clearDrop() { document.querySelectorAll('.drop-line').forEach((e) => e.remove()); }
@@ -1407,11 +1487,12 @@
   }
 
   function taskCard(t) {
-    const over = t.due && t.status !== 'done' && t.due < todayStr();
+    const over = t.due && t.status !== 'done' && t.due <= todayStr();
     const idx = STATUSES.findIndex((s) => s[0] === t.status);
     const linksCount = (t.links || []).length;
     const commentsCount = (t.comments || []).length;
     const bCount = blockersOf(t).length;
+    const pics = assigneesOf(t);
     const mv = (to, label) => h('button', {
       title: 'Pindah ke ' + STATUSES[to][1], 'aria-label': label,
       onclick: (e) => { e.stopPropagation(); moveTask(t.id, STATUSES[to][0]); },
@@ -1438,7 +1519,8 @@
       t.origin === 'change' && badge('CR', 'cr'),
       t.priority === 'high' && badge('High', 'prio-high'),
       t.due && badge(fmtShort(t.due), over ? 'over' : ''),
-      t.assignee && h('span', { class: 'avatar', title: t.assignee }, initials(t.assignee))),
+      pics.length > 0 && h('div', { class: 'card-avatars', title: `PIC: ${pics.join(', ')}` },
+        pics.map((p) => h('span', { class: 'avatar', title: `PIC: ${p}` }, initials(p))))),
     h('div', { class: 'mv' }, idx > 0 && mv(idx - 1, '←'), idx < STATUSES.length - 1 && mv(idx + 1, '→')));
   }
 
