@@ -218,6 +218,20 @@ route('POST', '/api/import', ({ body }) => {
   return saved();
 });
 
+route('POST', '/api/reset', ({ body }) => {
+  backupNow();
+  const rev = db.rev;
+  if (body && body.mode === 'seed') {
+    db = seed();
+    db.rev = rev;
+    addLog('Database di-reset ke data awal (Phase 1)');
+  } else {
+    db = { rev, phases: [], tasks: [], changes: [], log: [] };
+    addLog('Database dikosongkan (Clear DB)');
+  }
+  return saved();
+});
+
 /* phases */
 route('POST', '/api/phases', ({ body }) => {
   const p = { id: uid(), ...phaseInput(body), locked: false, approvedAt: null, baselineCount: 0 };
