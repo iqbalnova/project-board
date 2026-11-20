@@ -21,6 +21,7 @@
       <button data-view="kanban">Kanban</button>
     </nav>
     <div class="actions">
+      <button class="btn small" id="btn-user" title="Akun aktif / Ganti user">User</button>
       <button class="btn ghost small" id="btn-theme" title="Ganti tema">Light</button>
       <button class="btn ghost small" id="btn-log" title="Riwayat perubahan">Riwayat</button>
       <button class="btn ghost small" id="btn-export" title="Unduh backup JSON">Export</button>
@@ -31,6 +32,8 @@
 
   <main id="app"><p class="empty">Memuat…</p></main>
 
+  <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+  <aside id="drawer" class="drawer" aria-label="Detail Scope &amp; Workspace Tim" hidden></aside>
   <dialog id="dlg"></dialog>
   <div id="toast" role="status"></div>
 

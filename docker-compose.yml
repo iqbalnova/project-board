@@ -6,8 +6,9 @@ services:
     ports:
       - "3000:3000"
     environment:
-      APP_USER: admin
-      APP_PASSWORD: ${APP_PASSWORD:-}   # isi lewat file .env atau environment panel hosting
+      APP_USERS: ${APP_USERS:-}         # multi-user: user1:pass1,user2:pass2
+      APP_USER: ${APP_USER:-admin}
+      APP_PASSWORD: ${APP_PASSWORD:-}   # opsional jika masih memakai single user
     volumes:
       - board-data:/data
     mem_limit: 256m

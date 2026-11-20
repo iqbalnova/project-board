@@ -17,16 +17,19 @@
     set(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* abaikan */ } },
   };
 
-  let S = { rev: 0, phases: [], tasks: [], changes: [], log: [] };
+  let S = { rev: 0, phases: [], tasks: [], changes: [], log: [], me: { user: 'admin', authRequired: false, users: ['admin'] } };
   const ui = {
     view: store.get('view') === 'kanban' ? 'kanban' : 'timeline',
     phaseId: store.get('phaseId'),
     q: '',
     refocus: null,
+    drawerTaskId: null,
+    drawerRefocusComment: false,
+    addingBlocker: false,
+    needLogin: false,
     cascade: store.get('cascade') !== '0',
     theme: store.get('theme') === 'dark' ? 'dark' : 'light',
-    // Skala timeline chart: 'fit' (penuh) atau angka pxPerDay (4 .. 120)
-    scaleMode: store.get('scaleMode') || '1d', // '1d' | '3d' | '1w' | 'fit' | 'custom'
+    scaleMode: store.get('scaleMode') || '1d',
     pxPerDay: Number(store.get('pxPerDay')) || 42,
     scrollLeft: 0,
   };
@@ -38,6 +41,17 @@
     document.documentElement.dataset.theme = ui.theme;
     const btn = document.getElementById('btn-theme');
     if (btn) btn.textContent = ui.theme === 'dark' ? 'Dark' : 'Light';
+  }
+
+  function updateUserButton() {
+    const btn = document.getElementById('btn-user');
+    if (!btn) return;
+    if (ui.needLogin) {
+      btn.textContent = 'Login';
+      return;
+    }
+    const u = (S.me && S.me.user) || 'admin';
+    btn.textContent = u;
   }
 
   /* ======================= UTIL DOM & SVG ======================= */
@@ -80,10 +94,28 @@
 
   const badge = (text, cls = '') => h('span', { class: ('badge ' + cls).trim() }, text);
 
+  function renderLinkedText(text) {
+    const frag = document.createDocumentFragment();
+    const re = /(https?:\/\/[^\s<>")]+)/g;
+    let last = 0;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) frag.append(document.createTextNode(text.slice(last, m.index)));
+      const url = m[1];
+      let host = url;
+      try { host = new URL(url).hostname.replace(/^www\./, ''); } catch (_) { /* ignore */ }
+      frag.append(h('a', { href: url, target: '_blank', rel: 'noopener noreferrer', onclick: (e) => e.stopPropagation() }, `${host} ↗`));
+      last = re.lastIndex;
+    }
+    if (last < text.length) frag.append(document.createTextNode(text.slice(last)));
+    return frag;
+  }
+
   /* ======================= TANGGAL ======================= */
   const T = (s) => Date.parse(s + 'T00:00:00Z');
   const fmt = (s) => new Date(T(s)).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
   const fmtShort = (s) => new Date(T(s)).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  const fmtTime = (ts) => new Date(ts).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const pad = (n) => String(n).padStart(2, '0');
   const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
   const addDays = (s, n) => new Date(T(s) + n * DAY).toISOString().slice(0, 10);
@@ -107,7 +139,20 @@
     const done = ts.filter((t) => t.status === 'done').length;
     return { total: ts.length, done, pct: ts.length ? Math.round((done / ts.length) * 100) : 0 };
   }
-  const initials = (n) => n.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
+  const initials = (n) => (n || '?').split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
+  const blockersOf = (t) => Array.isArray(t.blockers) ? t.blockers : (t.blocker ? [{ id: 'legacy', text: t.blocker, by: 'tim' }] : []);
+
+  function envUsers() {
+    const list = (S.me && Array.isArray(S.me.users) && S.me.users.length) ? S.me.users : ['admin'];
+    return list.includes('admin') ? list : ['admin', ...list];
+  }
+
+  function picOptions(currentVal = '') {
+    const users = envUsers();
+    const opts = [['', '— Pilih PIC —'], ...users.map((u) => [u, u])];
+    if (currentVal && !users.includes(currentVal)) opts.push([currentVal, currentVal]);
+    return opts;
+  }
 
   /* ======================= API ======================= */
   async function api(method, url, body) {
@@ -116,6 +161,12 @@
     const res = await fetch(url, opt);
     let data = null;
     try { data = await res.json(); } catch (_) { /* bukan JSON */ }
+    if (res.status === 401 && url !== '/api/login') {
+      ui.needLogin = true;
+      ui.drawerTaskId = null;
+      render();
+      throw new Error((data && data.error) || 'Silakan login terlebih dahulu');
+    }
     if (!res.ok) throw new Error((data && data.error) || `Gagal (${res.status})`);
     return data;
   }
@@ -123,6 +174,7 @@
     const vp = document.querySelector('.g-viewport');
     if (vp) ui.scrollLeft = vp.scrollLeft;
     S = await api(method, url, body);
+    ui.needLogin = false;
     render();
   }
 
@@ -135,6 +187,105 @@
     toastTimer = setTimeout(() => { el.className = ''; }, 3200);
   }
   const safe = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message, true); } };
+
+  const refreshState = safe(async (showMsg = true) => {
+    const vp = document.querySelector('.g-viewport');
+    if (vp) ui.scrollLeft = vp.scrollLeft;
+    S = await api('GET', '/api/state');
+    ui.needLogin = false;
+    render();
+    if (showMsg) toast('Data diperbarui');
+  });
+
+  /* ======================= LOGIN & MULTI-USER ======================= */
+  function loginView() {
+    const err = h('div', { class: 'form-err', role: 'alert', hidden: true });
+    const uIn = h('input', { name: 'username', required: true, placeholder: 'Username', autocomplete: 'username' });
+    const pIn = h('input', { name: 'password', type: 'password', required: true, placeholder: 'Password', autocomplete: 'current-password' });
+    const btn = h('button', { type: 'submit', class: 'btn primary' }, 'Masuk');
+
+    const form = h('form', {
+      class: 'form',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        err.hidden = true;
+        btn.disabled = true;
+        try {
+          S = await api('POST', '/api/login', { username: uIn.value.trim(), password: pIn.value });
+          ui.needLogin = false;
+          render();
+          toast(`Masuk sebagai ${S.me.user}`);
+        } catch (ex) {
+          err.textContent = ex.message;
+          err.hidden = false;
+        } finally {
+          btn.disabled = false;
+        }
+      },
+    },
+    h('label', { class: 'field' }, h('span', {}, 'Username'), uIn),
+    h('label', { class: 'field' }, h('span', {}, 'Password'), pIn),
+    err,
+    btn);
+
+    setTimeout(() => uIn.focus(), 0);
+    return h('div', { class: 'panel login-wrap' },
+      h('h2', {}, 'Login Project Board'),
+      h('p', {}, 'Masukkan akun yang terdaftar di environment variable APP_USERS.'),
+      form);
+  }
+
+  function userDialog() {
+    const dlg = $('#dlg');
+    const me = (S.me && S.me.user) || 'admin';
+    const authReq = Boolean(S.me && S.me.authRequired);
+    const err = h('div', { class: 'form-err', role: 'alert', hidden: true });
+    const uIn = h('input', { name: 'username', required: true, value: me, placeholder: 'Nama user (mis: iqbal / budi)' });
+    const pIn = h('input', { name: 'password', type: 'password', required: authReq, placeholder: authReq ? 'Password' : 'Kosongkan (mode tanpa password)' });
+
+    const form = h('form', {
+      class: 'form',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        err.hidden = true;
+        try {
+          S = await api('POST', '/api/login', { username: uIn.value.trim(), password: pIn.value });
+          ui.needLogin = false;
+          dlg.close();
+          render();
+          toast(`Aktif sebagai ${S.me.user}`);
+        } catch (ex) {
+          err.textContent = ex.message;
+          err.hidden = false;
+        }
+      },
+    },
+    h('label', { class: 'field' }, h('span', {}, 'Username'), uIn),
+    authReq && h('label', { class: 'field' }, h('span', {}, 'Password'), pIn),
+    err,
+    h('div', { class: 'actions-row' },
+      authReq && h('button', {
+        type: 'button', class: 'btn danger spacer',
+        onclick: async () => {
+          await api('POST', '/api/logout', {});
+          dlg.close();
+          ui.needLogin = true;
+          ui.drawerTaskId = null;
+          render();
+        },
+      }, 'Logout'),
+      h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Batal'),
+      h('button', { type: 'submit', class: 'btn primary' }, 'Ganti User')));
+
+    dlg.replaceChildren(
+      h('div', { class: 'dlg-in' },
+        h('h2', {}, `User Aktif: ${me}`),
+        h('p', { class: 'intro' }, authReq
+          ? 'Multi-user aktif dari environment variable APP_USERS. Komentar dan riwayat otomatis memakai nama akun ini.'
+          : 'Ganti nama user aktif agar komentar di card tercatat atas namamu. (Untuk mengaktifkan password multi-user, isi APP_USERS=user1:pass1,user2:pass2 di .env).'),
+        form));
+    dlg.showModal();
+  }
 
   /* ======================= NAVIGASI & AKSI ======================= */
   function jumpToPhase(id) {
@@ -165,8 +316,285 @@
     });
   });
 
-  /* ======================= DIALOG ======================= */
-  function openForm({ title, intro, fields, submit = 'Simpan', onSubmit, extraButtons = [] }) {
+  const deletePhaseDirect = safe(async (p) => {
+    const count = tasksOf(p.id).length;
+    const msg = count
+      ? `Hapus "${p.name}" beserta ${count} item scope di dalamnya?`
+      : `Hapus "${p.name}"?`;
+    if (!confirm(msg)) return;
+    await mutate('DELETE', `/api/phases/${p.id}`);
+    toast(`${p.name} dihapus`);
+  });
+
+  /* ======================= SIDE-PEEK DETAIL SHEET ======================= */
+  function openTaskDrawer(t) {
+    if (ui.drawerTaskId !== t.id) ui.addingBlocker = false;
+    ui.drawerTaskId = t.id;
+    renderDrawer();
+  }
+
+  function closeTaskDrawer() {
+    ui.drawerTaskId = null;
+    ui.addingBlocker = false;
+    renderDrawer();
+  }
+
+  function renderDrawer() {
+    const drawer = $('#drawer');
+    const backdrop = $('#drawer-backdrop');
+    if (!drawer || !backdrop) return;
+
+    if (!ui.drawerTaskId || ui.needLogin) {
+      drawer.hidden = true;
+      backdrop.hidden = true;
+      drawer.replaceChildren();
+      return;
+    }
+
+    const t = S.tasks.find((x) => x.id === ui.drawerTaskId);
+    if (!t) {
+      ui.drawerTaskId = null;
+      drawer.hidden = true;
+      backdrop.hidden = true;
+      return;
+    }
+
+    const ph = phaseById(t.phaseId);
+    const cr = t.crId ? S.changes.find((c) => c.id === t.crId) : null;
+    const links = [...(t.links || [])];
+    const blockers = blockersOf(t);
+    const comments = t.comments || [];
+    const me = (S.me && S.me.user) || 'admin';
+
+    const patchField = safe(async (patch) => {
+      await mutate('PATCH', `/api/tasks/${t.id}`, patch);
+    });
+
+    // Top bar dengan tombol Refresh
+    const topBar = h('div', { class: 'drawer-top' },
+      h('div', { class: 'drawer-top-left' },
+        h('span', { style: { fontWeight: '600', color: 'var(--text-sec)' } }, ph ? ph.name : 'Phase'),
+        h('span', {}, '/'),
+        h('span', {}, 'Detail Ticket'),
+        t.origin === 'change' && badge('CR', 'cr')),
+      h('div', { class: 'drawer-top-actions' },
+        h('button', {
+          type: 'button', class: 'btn xs',
+          title: 'Refresh data & komentar terbaru',
+          onclick: () => refreshState(true),
+        }, '↻ Refresh'),
+        h('button', {
+          type: 'button', class: 'btn xs danger',
+          onclick: safe(async () => {
+            if (!confirm(`Hapus "${t.title}"?`)) return;
+            await mutate('DELETE', `/api/tasks/${t.id}`);
+            closeTaskDrawer();
+          }),
+        }, 'Hapus'),
+        h('button', { type: 'button', class: 'btn xs', onclick: closeTaskDrawer }, 'Tutup ✕')));
+
+    // Title input (auto-save)
+    const titleIn = h('input', {
+      class: 'drawer-title-input',
+      value: t.title,
+      maxlength: 200,
+      placeholder: 'Judul Scope / Ticket...',
+      onblur: () => {
+        const val = titleIn.value.trim();
+        if (val && val !== t.title) patchField({ title: val });
+      },
+      onkeydown: (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); titleIn.blur(); }
+      },
+    });
+
+    // Properties Grid (PIC dropdown dari env users)
+    const propGrid = h('div', { class: 'prop-grid' },
+      h('label', { class: 'prop-item' },
+        h('span', {}, 'Status'),
+        h('select', { onchange: (e) => patchField({ status: e.target.value }) },
+          STATUSES.map(([v, l]) => h('option', { value: v, selected: v === t.status }, l)))),
+      h('label', { class: 'prop-item' },
+        h('span', {}, 'Prioritas'),
+        h('select', { onchange: (e) => patchField({ priority: e.target.value }) },
+          PRIO_OPTIONS.map(([v, l]) => h('option', { value: v, selected: v === t.priority }, l)))),
+      h('label', { class: 'prop-item' },
+        h('span', {}, 'Phase'),
+        h('select', { onchange: (e) => patchField({ phaseId: e.target.value }) },
+          phases().map((p) => h('option', { value: p.id, selected: p.id === t.phaseId }, p.name + (p.locked ? ' (Locked)' : ''))))),
+      h('label', { class: 'prop-item' },
+        h('span', {}, 'PIC'),
+        h('select', { onchange: (e) => patchField({ assignee: e.target.value }) },
+          picOptions(t.assignee).map(([v, l]) => h('option', { value: v, selected: v === (t.assignee || '') }, l)))),
+      h('label', { class: 'prop-item' },
+        h('span', {}, 'Deadline'),
+        h('input', {
+          type: 'date', value: t.due || '',
+          onchange: (e) => patchField({ due: e.target.value }),
+        })));
+
+    // 1. DESKRIPSI (Di paling atas setelah properti)
+    const descIn = h('textarea', {
+      rows: 4,
+      maxlength: 4000,
+      placeholder: 'Tulis deskripsi, spesifikasi, atau catatan context (otomatis disimpan saat selesai ketik)...',
+      onblur: () => {
+        if (descIn.value !== (t.desc || '')) patchField({ desc: descIn.value });
+      },
+    }, t.desc || '');
+
+    const descSec = h('div', { class: 'ws-section' },
+      h('div', { class: 'ws-head' },
+        h('span', {}, 'DESKRIPSI')),
+      descIn,
+      t.desc && /https?:\/\//.test(t.desc) && h('div', { class: 'notion-preview' },
+        h('div', { class: 'small muted', style: { marginBottom: '4px', fontWeight: '600' } }, 'Link Aktif di Deskripsi:'),
+        renderLinkedText(t.desc)));
+
+    // 2. LINK DOKUMEN (Section tersendiri)
+    const lTitleIn = h('input', { name: 'ltitle', placeholder: 'Label (mis: Figma / API Spec / PRD)', maxlength: 120 });
+    const lUrlIn = h('input', { name: 'lurl', placeholder: 'https://...', maxlength: 1000 });
+    const addLinkForm = h('form', {
+      class: 'link-add-row',
+      onsubmit: safe(async (e) => {
+        e.preventDefault();
+        let url = lUrlIn.value.trim();
+        if (!url) return;
+        if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+        links.push({ id: String(Date.now()), title: lTitleIn.value.trim() || url, url });
+        await patchField({ links });
+      }),
+    }, lTitleIn, lUrlIn, h('button', { type: 'submit', class: 'btn xs' }, '+ Link'));
+
+    const linksSec = h('div', { class: 'ws-section' },
+      h('div', { class: 'ws-head' },
+        h('span', {}, `LINK DOKUMEN (${links.length})`)),
+      links.length > 0 && h('div', { class: 'links-list' },
+        links.map((l, idx) => h('div', { class: 'link-card' },
+          h('a', { href: l.url, target: '_blank', rel: 'noopener noreferrer' }, `${l.title} ↗`),
+          h('button', {
+            type: 'button', title: 'Hapus link',
+            onclick: () => { links.splice(idx, 1); patchField({ links }); },
+          }, '×')))),
+      addLinkForm);
+
+    // 3. MULTI-BLOCKER (Jika kosong dan belum klik tambah -> sisa tombol '+ Tambah Blocker' saja)
+    let blockerSec;
+    if (!blockers.length && !ui.addingBlocker) {
+      blockerSec = h('div', { class: 'blocker-add-trigger' },
+        h('button', {
+          type: 'button',
+          class: 'btn small danger',
+          onclick: () => { ui.addingBlocker = true; renderDrawer(); },
+        }, '+ Tambah Blocker'));
+    } else {
+      const bIn = h('input', {
+        placeholder: 'Tulis kendala / blocker baru... (tekan Enter)',
+        maxlength: 500,
+      });
+      if (ui.addingBlocker) {
+        requestAnimationFrame(() => bIn.focus());
+      }
+      const addBlockerForm = h('form', {
+        class: 'comment-form',
+        onsubmit: safe(async (e) => {
+          e.preventDefault();
+          const text = bIn.value.trim();
+          if (!text) return;
+          ui.addingBlocker = false;
+          await mutate('POST', `/api/tasks/${t.id}/blockers`, { text });
+        }),
+      },
+      bIn,
+      h('button', { type: 'submit', class: 'btn xs danger' }, 'Simpan'),
+      h('button', {
+        type: 'button', class: 'btn xs ghost',
+        onclick: () => { ui.addingBlocker = false; renderDrawer(); },
+      }, 'Batal'));
+
+      blockerSec = h('div', { class: 'ws-section blocker-sec' },
+        h('div', { class: 'ws-head' },
+          h('span', { style: { color: 'var(--bad)' } }, `BLOCKER / KENDALA (${blockers.length})`),
+          !ui.addingBlocker && h('button', {
+            type: 'button', class: 'btn xs danger',
+            onclick: () => { ui.addingBlocker = true; renderDrawer(); },
+          }, '+ Tambah Blocker')),
+        blockers.length > 0 && h('ul', { class: 'blocker-list' },
+          blockers.map((b) => h('li', { class: 'blocker-item' },
+            h('div', { class: 'blocker-item-main' },
+              h('span', {}, b.text),
+              b.by && h('span', { class: 'blocker-item-by' }, `· ${b.by}`)),
+            h('button', {
+              type: 'button', class: 'btn xs',
+              title: 'Tandai blocker ini selesai',
+              onclick: safe(async () => {
+                await mutate('DELETE', `/api/tasks/${t.id}/blockers/${b.id}`);
+              }),
+            }, 'Selesai ✓')))),
+        ui.addingBlocker && addBlockerForm);
+    }
+
+    // 4. KOMENTAR TIM
+    const commentIn = h('input', {
+      placeholder: `Tulis komentar sebagai ${me}… (tekan Enter)`,
+      maxlength: 1000,
+    });
+    if (ui.drawerRefocusComment) {
+      ui.drawerRefocusComment = false;
+      requestAnimationFrame(() => commentIn.focus());
+    }
+
+    const commentForm = h('form', {
+      class: 'comment-form',
+      onsubmit: safe(async (e) => {
+        e.preventDefault();
+        const text = commentIn.value.trim();
+        if (!text) return;
+        ui.drawerRefocusComment = true;
+        await mutate('POST', `/api/tasks/${t.id}/comments`, { text });
+      }),
+    }, commentIn, h('button', { type: 'submit', class: 'btn xs primary' }, 'Kirim'));
+
+    const commentSec = h('div', { class: 'ws-section' },
+      h('div', { class: 'ws-head' },
+        h('span', {}, `KOMENTAR (${comments.length})`),
+        h('span', { class: 'muted small' }, `Aktif sebagai: ${me}`)),
+      comments.length > 0
+        ? h('ul', { class: 'comment-list' },
+            comments.map((c) => h('li', { class: 'comment-item' },
+              h('span', { class: 'comment-avatar', title: c.user }, initials(c.user)),
+              h('div', { class: 'comment-main' },
+                h('div', { class: 'comment-head' },
+                  h('span', { class: 'comment-user' }, c.user),
+                  h('time', { class: 'comment-time' }, fmtTime(c.ts)),
+                  h('button', {
+                    type: 'button', class: 'comment-del', title: 'Hapus komentar',
+                    onclick: safe(async () => {
+                      await mutate('DELETE', `/api/tasks/${t.id}/comments/${c.id}`);
+                    }),
+                  }, '×')),
+                h('div', { class: 'comment-text' }, renderLinkedText(c.text))))))
+        : h('div', { class: 'muted small' }, 'Belum ada komentar di ticket ini.'),
+      commentForm);
+
+    const body = h('div', { class: 'drawer-body' },
+      h('div', {},
+        titleIn,
+        t.origin === 'change' && cr && h('p', { class: 'muted small', style: { marginTop: '6px' } },
+          `Masuk lewat Change Request${cr.requestedBy ? ' dari ' + cr.requestedBy : ''}${cr.decisionNote ? ' — ' + cr.decisionNote : ''}.`)),
+      propGrid,
+      descSec,
+      linksSec,
+      blockerSec,
+      commentSec);
+
+    drawer.replaceChildren(topBar, body);
+    drawer.hidden = false;
+    backdrop.hidden = false;
+  }
+
+  /* ======================= DIALOG FORM STANDAR ======================= */
+  function openForm({ title, intro, fields, submit = 'Simpan', onSubmit, extraButtons = [], wide = false }) {
     const dlg = $('#dlg');
     const err = h('div', { class: 'form-err', role: 'alert', hidden: true });
     const inputs = {};
@@ -211,7 +639,7 @@
       },
     }, rows, err, h('div', { class: 'actions-row' }, extras, h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Batal'), submitBtn));
 
-    dlg.replaceChildren(h('div', { class: 'dlg-in' }, h('h2', {}, title), intro && h('p', { class: 'intro' }, intro), form));
+    dlg.replaceChildren(h('div', { class: 'dlg-in' + (wide ? ' wide' : '') }, h('h2', {}, title), intro && h('p', { class: 'intro' }, intro), form));
     dlg.showModal();
     setTimeout(() => { const f = form.querySelector('input:not([type=checkbox]),textarea,select'); if (f) f.focus(); }, 0);
   }
@@ -225,6 +653,7 @@
   function resetDialog() {
     const dlg = $('#dlg');
     const doReset = safe(async (mode, msg) => {
+      closeTaskDrawer();
       await mutate('POST', '/api/reset', { mode });
       dlg.close();
       toast(msg);
@@ -284,8 +713,13 @@
       submit: p ? 'Simpan' : 'Buat Phase',
       onSubmit: (v) => (p ? mutate('PATCH', `/api/phases/${p.id}`, v) : mutate('POST', '/api/phases', v)),
       extraButtons: p ? [{
-        label: 'Hapus', danger: true,
-        onClick: async () => { if (!confirm(`Hapus ${p.name}?`)) return false; await mutate('DELETE', `/api/phases/${p.id}`); return true; },
+        label: 'Hapus Phase', danger: true,
+        onClick: async () => {
+          const count = tasksOf(p.id).length;
+          if (!confirm(count ? `Hapus ${p.name} beserta ${count} item scope di dalamnya?` : `Hapus ${p.name}?`)) return false;
+          await mutate('DELETE', `/api/phases/${p.id}`);
+          return true;
+        },
       }] : [],
     });
   }
@@ -295,10 +729,10 @@
     return openForm({
       title: `Task Baru · ${ph.name}`,
       fields: [
-        { name: 'title', label: 'Judul', required: true, maxlength: 200 },
-        { name: 'desc', label: 'Deskripsi', type: 'textarea', maxlength: 4000 },
+        { name: 'title', label: 'Judul Scope / Ticket', required: true, maxlength: 200 },
+        { name: 'desc', label: 'Deskripsi', type: 'textarea', maxlength: 4000, placeholder: 'Tulis deskripsi atau catatan spesifikasi...' },
         { name: 'priority', label: 'Prioritas', type: 'select', options: PRIO_OPTIONS, value: 'medium' },
-        { name: 'assignee', label: 'PIC', maxlength: 60 },
+        { name: 'assignee', label: 'PIC', type: 'select', options: picOptions(''), value: '' },
         { name: 'due', label: 'Deadline', type: 'date' },
       ],
       submit: 'Tambah',
@@ -306,42 +740,21 @@
     });
   }
 
-  function editTaskDialog(t) {
-    const cr = t.crId ? S.changes.find((c) => c.id === t.crId) : null;
-    openForm({
-      title: 'Detail Task',
-      intro: t.origin === 'change' ? `Dari Change Request${cr && cr.requestedBy ? ' (' + cr.requestedBy + ')' : ''}${cr && cr.decisionNote ? ' — ' + cr.decisionNote : ''}.` : null,
-      fields: [
-        { name: 'title', label: 'Judul', required: true, maxlength: 200, value: t.title },
-        { name: 'desc', label: 'Deskripsi', type: 'textarea', maxlength: 4000, value: t.desc },
-        { name: 'status', label: 'Status', type: 'select', options: STATUSES, value: t.status },
-        { name: 'priority', label: 'Prioritas', type: 'select', options: PRIO_OPTIONS, value: t.priority },
-        { name: 'assignee', label: 'PIC', maxlength: 60, value: t.assignee },
-        { name: 'due', label: 'Deadline', type: 'date', value: t.due },
-        { name: 'phaseId', label: 'Phase', type: 'select', options: phases().map((p) => [p.id, p.name + (p.locked ? ' (Terkunci)' : '')]), value: t.phaseId },
-      ],
-      onSubmit: (v) => mutate('PATCH', `/api/tasks/${t.id}`, v),
-      extraButtons: [{
-        label: 'Hapus', danger: true,
-        onClick: async () => { if (!confirm('Hapus task ini?')) return false; await mutate('DELETE', `/api/tasks/${t.id}`); return true; },
-      }],
-    });
-  }
-
   function crDialog(phaseId) {
     const cur = phaseById(phaseId) || currentPhase();
     if (!cur) return toast('Buat phase terlebih dahulu', true);
+    const me = (S.me && S.me.user) || '';
     return openForm({
-      title: 'Ajukan Change Request',
-      intro: 'Catat permintaan perubahan scope dari stakeholder untuk diputuskan.',
+      title: 'Ajukan Change Request (Tambahan Scope)',
+      intro: 'Gunakan Change Request ketika ada permintaan fitur/perubahan baru di tengah phase agar dampaknya terhadap timeline tercatat jelas.',
       fields: [
-        { name: 'title', label: 'Perubahan yang diminta', required: true, maxlength: 200 },
-        { name: 'desc', label: 'Detail', type: 'textarea', maxlength: 4000 },
-        { name: 'requestedBy', label: 'Diminta oleh', maxlength: 80 },
-        { name: 'reason', label: 'Alasan / dampak', type: 'textarea', maxlength: 1000 },
-        { name: 'phaseId', label: 'Phase terkait', type: 'select', options: phases().map((p) => [p.id, p.name]), value: cur.id },
+        { name: 'title', label: 'Apa perubahan / fitur yang diminta?', required: true, maxlength: 200, placeholder: 'Contoh: Tambah ekspor laporan PDF di halaman transaksi' },
+        { name: 'requestedBy', label: 'Diminta oleh (Stakeholder / Divisi)', maxlength: 80, value: me, placeholder: 'Contoh: Tim Finance / Product Owner' },
+        { name: 'reason', label: 'Alasan & Dampak ke Timeline', type: 'textarea', maxlength: 1000, placeholder: 'Contoh: Dibutuhkan untuk audit akhir bulan, estimasi +2 hari kerja' },
+        { name: 'desc', label: 'Detail spesifikasi / Link dokumen', type: 'textarea', maxlength: 4000, placeholder: 'Catatan detail atau link PRD / Figma...' },
+        { name: 'phaseId', label: 'Diajukan pada Phase', type: 'select', options: phases().map((p) => [p.id, p.name + (p.locked ? ' (Scope Terkunci)' : '')]), value: cur.id },
       ],
-      submit: 'Ajukan',
+      submit: 'Simpan ke Antrean CR',
       onSubmit: (v) => mutate('POST', '/api/changes', v),
     });
   }
@@ -350,22 +763,41 @@
     const ph = phaseById(c.phaseId);
     const nxt = nextPhaseOf(c.phaseId);
     const cfg = {
-      current: { title: `Masukkan ke ${ph ? ph.name : 'phase ini'}`, intro: `"${c.title}" akan masuk ke ${ph ? ph.name : 'phase ini'} dengan label CR.`, submit: 'Setujui' },
-      next: { title: `Geser ke ${nxt ? nxt.name : 'phase berikutnya'}`, intro: `"${c.title}" akan dimasukkan ke ${nxt ? nxt.name : 'phase berikutnya'} (label CR).`, submit: 'Geser' },
-      reject: { title: 'Tolak Change Request', intro: `"${c.title}" ditolak dan tidak masuk scope.`, submit: 'Tolak' },
+      current: {
+        title: `Setujui Masuk ${ph ? ph.name : 'Phase Ini'} (Scope Bertambah)`,
+        intro: `"${c.title}" akan langsung masuk sebagai task baru berlabel CR di ${ph ? ph.name : 'phase ini'}. Kamu juga bisa memperpanjang durasi phase jika dibutuhkan.`,
+        submit: 'Setujui & Masukkan ke Phase Ini',
+      },
+      next: {
+        title: nxt ? `Geser ke ${nxt.name}` : 'Buat Phase Berikutnya & Geser',
+        intro: nxt
+          ? `"${c.title}" akan dimasukkan ke ${nxt.name} agar jadwal ${ph ? ph.name : 'phase sekarang'} tetap aman.`
+          : `Belum ada phase setelah ${ph ? ph.name : 'ini'}. Phase berikutnya akan otomatis dibuatkan dan item "${c.title}" dimasukkan ke sana.`,
+        submit: nxt ? `Geser ke ${nxt.name}` : 'Buat Phase Baru & Geser',
+      },
+      reject: {
+        title: 'Tolak Change Request',
+        intro: `"${c.title}" tidak akan dikerjakan dan tercatat sebagai ditolak di riwayat keputusan.`,
+        submit: 'Tolak Permintaan',
+      },
     }[decision];
     const fields = [{
       name: 'note', type: 'textarea', maxlength: 1000, required: decision === 'current',
-      label: decision === 'current' ? 'Alasan wajib masuk phase berjalan' : 'Catatan keputusan (opsional)',
+      label: decision === 'current' ? 'Alasan kenapa wajib masuk di phase berjalan (Wajib)' : 'Catatan keputusan (opsional)',
+      placeholder: decision === 'current' ? 'Contoh: Blocker regulasi / disetujui stakeholder dengan tambahan waktu 2 hari' : 'Catatan tambahan...',
     }];
-    if (decision !== 'reject') fields.push({ name: 'priority', label: 'Prioritas task', type: 'select', options: PRIO_OPTIONS, value: decision === 'current' ? 'high' : 'medium' });
+    if (decision !== 'reject') fields.push({ name: 'priority', label: 'Prioritas Task', type: 'select', options: PRIO_OPTIONS, value: decision === 'current' ? 'high' : 'medium' });
     if (decision === 'current') {
       fields.push(
-        { name: 'extendDays', label: 'Tambah durasi phase (hari)', type: 'number', min: 0, max: 365, step: 1, value: 0 },
-        { name: 'cascade', label: 'Geser phase berikutnya otomatis', type: 'checkbox', value: true },
+        { name: 'extendDays', label: 'Perpanjang durasi phase ini (hari)', type: 'number', min: 0, max: 365, step: 1, value: 0, hint: 'Isi 0 jika timeline tidak diperpanjang' },
+        { name: 'cascade', label: 'Geser phase berikutnya otomatis sesuai perpanjangan', type: 'checkbox', value: true },
       );
     }
-    openForm({ ...cfg, fields, onSubmit: (v) => mutate('POST', `/api/changes/${c.id}/decide`, { decision, ...v }) });
+    openForm({
+      ...cfg,
+      fields,
+      onSubmit: (v) => mutate('POST', `/api/changes/${c.id}/decide`, { decision, autoCreateNext: true, ...v }),
+    });
   }
 
   const toggleLock = safe(async (p) => {
@@ -392,7 +824,6 @@
     render();
   }
 
-  // Hitung ticks dinamis berdasarkan kerapatan pixel per hari (seperti TradingView)
   function buildTimeAxis(t0, t1, pxPerDay) {
     const daysTotal = Math.round((t1 - t0) / DAY);
     const months = [];
@@ -400,11 +831,6 @@
     const weekends = [];
     const nowT = T(todayStr());
 
-    // Tentukan step hari berdasarkan zoom (pxPerDay):
-    // >= 24px/hari -> tampilkan TIAP 1 HARI penuh
-    // >= 12px/hari -> tiap 2 hari
-    // >= 6px/hari  -> mingguan (Senin)
-    // < 6px/hari   -> awal bulan
     let stepDays = 1;
     if (pxPerDay >= 24) stepDays = 1;
     else if (pxPerDay >= 12) stepDays = 2;
@@ -551,7 +977,6 @@
     const maxP = Math.max(...ps.map((p) => T(p.end)));
     const now = T(todayStr());
 
-    // Padding ekstra agar leluasa di-pan & di-stretch seperti chart
     const padBefore = ui.scaleMode === 'fit' ? 2 * DAY : 5 * DAY;
     const padAfter = ui.scaleMode === 'fit' ? 3 * DAY : 10 * DAY;
     const t0 = minP - padBefore;
@@ -559,7 +984,6 @@
     const span = t1 - t0;
     const totalDays = Math.round(span / DAY);
 
-    // Estimasi lebar viewport (1400 - sidebar 230 = ~1120px)
     const vpEstWidth = Math.max(520, Math.min(1360, window.innerWidth - 40) - 232);
     const effectivePxPerDay = ui.scaleMode === 'fit'
       ? Math.max(4, vpEstWidth / totalDays)
@@ -619,7 +1043,6 @@
 
     const viewport = h('div', { class: 'g-viewport' }, canvas);
 
-    // 1. Drag pada Time Axis Header untuk stretch/compress skala hari (persis TradingView)
     timeHead.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
@@ -650,7 +1073,6 @@
       window.addEventListener('mouseup', onUp);
     });
 
-    // 2. Wheel zoom pada Time Axis (atau Ctrl/Alt + Wheel di area chart)
     viewport.addEventListener('wheel', (e) => {
       const onAxis = e.target.closest('.g-time-head');
       if (!onAxis && !e.ctrlKey && !e.metaKey && !e.altKey) return;
@@ -672,7 +1094,6 @@
       render();
     }, { passive: false });
 
-    // 3. Drag-to-pan di area kosong chart
     viewport.addEventListener('mousedown', (e) => {
       if (e.button !== 0 || e.target.closest('.g-bar') || e.target.closest('.g-time-head')) return;
       const startX = e.clientX;
@@ -716,7 +1137,7 @@
     return h('div', { class: 'gantt-outer' }, sidebar, viewport);
   }
 
-  /* ======================= SCOPE ITEM & STATE SWITCHER (LINEAR MINIMAL) ======================= */
+  /* ======================= SCOPE ITEM ======================= */
   const setTaskStatus = safe(async (t, newStatus) => {
     if (t.status === newStatus) return;
     await mutate('POST', `/api/tasks/${t.id}/move`, { status: newStatus });
@@ -724,31 +1145,44 @@
 
   const deleteTaskQuick = safe(async (t) => {
     if (!confirm(`Hapus "${t.title}"?`)) return;
+    if (ui.drawerTaskId === t.id) ui.drawerTaskId = null;
     await mutate('DELETE', `/api/tasks/${t.id}`);
   });
 
   function itemRow(t) {
     const over = t.due && t.status !== 'done' && t.due < todayStr();
-    return h('li', { class: 'scope-row' + (t.status === 'done' ? ' is-done' : '') },
-      h('div', { class: 'state-seg', role: 'group', 'aria-label': 'Status task' },
-        STATUSES.map(([stKey, stLabel]) =>
+    const linksCount = (t.links || []).length;
+    const commentsCount = (t.comments || []).length;
+    const bCount = blockersOf(t).length;
+
+    return h('li', { class: 'scope-row' + (t.status === 'done' ? ' is-done' : '') + (bCount ? ' has-blocker' : '') },
+      h('div', { class: 'scope-row-main' },
+        h('div', { class: 'state-seg', role: 'group', 'aria-label': 'Status task' },
+          STATUSES.map(([stKey, stLabel]) =>
+            h('button', {
+              type: 'button',
+              class: t.status === stKey ? 'on' : '',
+              dataset: { st: stKey },
+              title: `Ubah ke ${stLabel}`,
+              onclick: () => setTaskStatus(t, stKey),
+            }, statusSvg(stKey), h('span', { class: 'st-txt' }, STATUS_SHORT[stKey])))),
+        h('span', {
+          class: 'scope-title',
+          onclick: () => openTaskDrawer(t),
+          title: 'Klik untuk buka detail ticket, blocker, dokumen & komentar',
+        }, t.title),
+        h('div', { class: 'scope-meta', onclick: () => openTaskDrawer(t), style: { cursor: 'pointer' } },
+          bCount > 0 && badge(bCount > 1 ? `${bCount} Blocker` : 'Blocker', 'over'),
+          commentsCount > 0 && badge(`${commentsCount} Komentar`, ''),
+          linksCount > 0 && badge(`${linksCount} Link`, ''),
+          t.origin === 'change' && badge('CR', 'cr'),
+          t.priority === 'high' && badge('High', 'prio-high'),
+          t.due && badge(fmtShort(t.due), over ? 'over' : ''),
+          t.assignee && h('span', { class: 'scope-assignee' }, t.assignee),
           h('button', {
-            type: 'button',
-            class: t.status === stKey ? 'on' : '',
-            dataset: { st: stKey },
-            title: `Ubah ke ${stLabel}`,
-            onclick: () => setTaskStatus(t, stKey),
-          }, statusSvg(stKey), h('span', { class: 'st-txt' }, STATUS_SHORT[stKey])))),
-      h('span', { class: 'scope-title', onclick: () => editTaskDialog(t), title: 'Klik untuk edit detail' }, t.title),
-      h('div', { class: 'scope-meta' },
-        t.origin === 'change' && badge('CR', 'cr'),
-        t.priority === 'high' && badge('High', 'prio-high'),
-        t.due && badge(fmtShort(t.due), over ? 'over' : ''),
-        t.assignee && h('span', { class: 'scope-assignee' }, t.assignee),
-        h('button', {
-          type: 'button', class: 'scope-del', title: 'Hapus item',
-          onclick: () => deleteTaskQuick(t),
-        }, '×')));
+            type: 'button', class: 'scope-del', title: 'Hapus item',
+            onclick: (e) => { e.stopPropagation(); deleteTaskQuick(t); },
+          }, '×'))));
   }
 
   function addItemComposer(p) {
@@ -761,7 +1195,8 @@
     });
     const prioIn = h('select', { class: 'composer-pill', name: 'priority', 'aria-label': 'Prioritas', title: 'Prioritas' },
       PRIO_OPTIONS.map(([v, l]) => h('option', { value: v, selected: v === 'medium' }, l)));
-    const picIn = h('input', { class: 'composer-pill', name: 'assignee', placeholder: 'PIC', maxlength: 60, 'aria-label': 'PIC' });
+    const picIn = h('select', { class: 'composer-pill', name: 'assignee', 'aria-label': 'PIC', title: 'Pilih PIC' },
+      [['', 'PIC'], ...envUsers().map((u) => [u, u])].map(([v, l]) => h('option', { value: v }, l)));
     const dueIn = h('input', { class: 'composer-pill', name: 'due', type: 'date', 'aria-label': 'Deadline', title: 'Deadline' });
 
     if (ui.refocus === p.id) { ui.refocus = null; requestAnimationFrame(() => titleIn.focus()); }
@@ -777,7 +1212,7 @@
           phaseId: p.id,
           title,
           priority: prioIn.value,
-          assignee: picIn.value.trim(),
+          assignee: picIn.value,
           due: dueIn.value,
         });
       }),
@@ -796,6 +1231,7 @@
     const items = tasksOf(p.id).sort((a, b) => a.order - b.order);
     const base = items.filter((t) => t.origin !== 'change');
     const chg = items.filter((t) => t.origin === 'change');
+    const blockersCount = items.reduce((sum, t) => sum + blockersOf(t).length, 0);
 
     const statusSelect = h('select', {
       class: 'phase-status-sel st-' + p.status,
@@ -812,6 +1248,7 @@
           h('h3', {}, p.name),
           statusSelect,
           p.locked && badge('Locked', 'lock'),
+          blockersCount > 0 && badge(`${blockersCount} Blocker`, 'over'),
           h('div', { class: 'phase-meta-inline' },
             h('span', {}, `${fmt(p.start)} – ${fmt(p.end)} (${days(p)}h)`),
             h('span', {}, `· ${st.done}/${st.total} selesai (${st.pct}%)`))),
@@ -820,65 +1257,97 @@
           h('button', { class: 'btn xs ghost', onclick: () => adjustPhaseDates(p, 0, 1), title: 'Tambah durasi 1 hari' }, '+1h'),
           h('button', { class: 'btn small', onclick: () => openPhaseInKanban(p.id) }, 'Kanban →'),
           h('button', { class: 'btn small', onclick: () => toggleLock(p) }, p.locked ? 'Buka Kunci' : 'Kunci Scope'),
-          h('button', { class: 'btn small ghost', onclick: () => phaseDialog(p) }, 'Edit'))),
-      p.goal && h('div', { class: 'phase-goal' }, p.goal),
+          h('button', { class: 'btn small ghost', onclick: () => phaseDialog(p) }, 'Edit'),
+          h('button', { class: 'btn small ghost danger-text', onclick: () => deletePhaseDirect(p), title: 'Hapus Phase ini' }, 'Hapus'))),
+      p.goal && h('div', { class: 'phase-goal' }, renderLinkedText(p.goal)),
       p.locked && h('div', { class: 'phase-lock-banner' },
         h('span', {}, `Baseline terkunci (${p.baselineCount} item · ${fmt(p.approvedAt.slice(0, 10))}). Permintaan baru wajib lewat Change Request.`),
         h('button', { class: 'btn xs', onclick: () => crDialog(p.id) }, '+ Change Request')),
       h('div', { class: 'scope-section-label' },
         h('span', {}, `SCOPE (${base.length})`),
-        h('span', {}, 'STATUS · ITEM')),
+        h('span', {}, 'Klik item untuk detail & komentar')),
       base.length
         ? h('ul', { class: 'scope-list' }, base.map(itemRow))
         : h('div', { class: 'empty', style: { padding: '14px' } }, 'Belum ada item scope.'),
       chg.length ? [
-        h('div', { class: 'scope-section-label' }, h('span', {}, `CHANGE REQUEST MASUK (${chg.length})`)),
+        h('div', { class: 'scope-section-label' }, h('span', {}, `TAMBAHAN DARI CHANGE REQUEST (${chg.length})`)),
         h('ul', { class: 'scope-list' }, chg.map(itemRow)),
       ] : null,
       !p.locked && addItemComposer(p));
   }
 
-  /* ======================= CHANGE REQUEST PANEL ======================= */
+  /* ======================= UX-FRIENDLY CHANGE REQUEST PANEL ======================= */
   function crCard(c) {
     const ph = phaseById(c.phaseId);
     const nxt = ph ? nextPhaseOf(ph.id) : null;
+    const phName = ph ? ph.name : (c.phaseName || 'Phase');
+
     return h('div', { class: 'cr' },
+      h('div', { class: 'cr-top' },
+        badge(`Target: ${phName}`, 'st-active'),
+        h('button', {
+          class: 'btn xs ghost', title: 'Batalkan / hapus pengajuan ini',
+          onclick: safe(async () => { if (confirm('Hapus pengajuan Change Request ini?')) await mutate('DELETE', `/api/changes/${c.id}`); }),
+        }, '×')),
       h('h4', {}, c.title),
-      h('div', { class: 'meta' }, `${c.requestedBy ? c.requestedBy + ' · ' : ''}${ph ? ph.name : c.phaseName} · ${fmtShort(c.createdAt.slice(0, 10))}`),
-      c.desc && h('p', {}, c.desc),
-      c.reason && h('p', { class: 'why muted' }, 'Dampak: ' + c.reason),
-      h('div', { class: 'btns' },
-        ph && h('button', { class: 'btn xs primary', onclick: () => decideDialog(c, 'current') }, `Masuk ${ph.name}`),
-        h('button', {
-          class: 'btn xs', disabled: !nxt, onclick: () => decideDialog(c, 'next'),
-        }, nxt ? `Geser ke ${nxt.name}` : 'Geser (buat phase dulu)'),
-        h('button', { class: 'btn xs danger', onclick: () => decideDialog(c, 'reject') }, 'Tolak'),
-        h('button', {
-          class: 'btn xs ghost', title: 'Hapus',
-          onclick: safe(async () => { if (confirm('Hapus permintaan ini?')) await mutate('DELETE', `/api/changes/${c.id}`); }),
-        }, '×')));
+      h('div', { class: 'meta' },
+        c.requestedBy && h('span', {}, `Oleh: ${c.requestedBy}`),
+        c.requestedBy && h('span', {}, '·'),
+        h('span', {}, `Diajukan ${fmtShort(c.createdAt.slice(0, 10))}`)),
+      c.desc && h('p', {}, renderLinkedText(c.desc)),
+      c.reason && h('div', { class: 'cr-impact' }, `Alasan / Dampak: ${c.reason}`),
+      h('div', { class: 'cr-decision-box' },
+        h('span', { class: 'cr-decision-lbl' }, 'Putuskan Tindakan Scope:'),
+        h('div', { class: 'btns' },
+          ph && h('button', {
+            class: 'btn xs primary',
+            title: `Masukkan ke ${ph.name} sekarang (bisa disertai perpanjangan hari)`,
+            onclick: () => decideDialog(c, 'current'),
+          }, `+ Masuk ${ph.name}`),
+          h('button', {
+            class: 'btn xs',
+            title: nxt ? `Jangan ganggu ${phName}, kerjakan di ${nxt.name}` : 'Otomatis buat phase berikutnya dan geser ke sana',
+            onclick: () => decideDialog(c, 'next'),
+          }, nxt ? `→ Geser ke ${nxt.name}` : '→ Buat Phase Baru & Geser'),
+          h('button', {
+            class: 'btn xs danger',
+            title: 'Tolak permintaan perubahan ini',
+            onclick: () => decideDialog(c, 'reject'),
+          }, 'Tolak'))));
   }
 
   function crDone(c) {
     let outcome;
-    if (c.status === 'rejected') outcome = 'Ditolak';
-    else if (c.decision === 'current') outcome = `Masuk ${c.decidedPhaseName}${c.extendDays ? ` (+${c.extendDays}h)` : ''}`;
-    else outcome = `Digeser ke ${c.decidedPhaseName}`;
+    let badgeCls = '';
+    if (c.status === 'rejected') { outcome = 'Ditolak'; badgeCls = 'over'; }
+    else if (c.decision === 'current') { outcome = `Masuk ${c.decidedPhaseName}${c.extendDays ? ` (+${c.extendDays}h)` : ''}`; badgeCls = 'st-active'; }
+    else { outcome = `Digeser ke ${c.decidedPhaseName}`; badgeCls = 'st-done'; }
+
     return h('div', { class: 'cr done' },
-      h('h4', {}, c.title),
-      h('div', { class: 'meta' }, `${outcome}${c.decidedAt ? ' · ' + fmtShort(c.decidedAt.slice(0, 10)) : ''}`),
-      c.decisionNote && h('p', { class: 'why muted' }, c.decisionNote));
+      h('div', { class: 'cr-top' },
+        h('h4', {}, c.title),
+        badge(outcome, badgeCls)),
+      h('div', { class: 'meta' },
+        c.requestedBy && h('span', {}, `Oleh: ${c.requestedBy} · `),
+        c.decidedAt && h('span', {}, `Diputuskan ${fmtShort(c.decidedAt.slice(0, 10))}`)),
+      c.decisionNote && h('p', { class: 'why muted' }, `Catatan: ${c.decisionNote}`));
   }
 
   function changePanel() {
     const pending = S.changes.filter((c) => c.status === 'pending');
     const decided = S.changes.filter((c) => c.status !== 'pending').sort((a, b) => (b.decidedAt || '').localeCompare(a.decidedAt || ''));
-    return h('aside', { class: 'panel changes' },
+    return h('aside', { class: 'panel changes' + (pending.length ? ' has-pending' : '') },
       h('div', { class: 'panel-head' },
-        h('h2', {}, `Change Requests${pending.length ? ` (${pending.length})` : ''}`),
-        h('button', { class: 'btn xs', onclick: () => crDialog() }, '+ Ajukan')),
-      pending.length ? pending.map(crCard) : h('p', { class: 'empty' }, 'Tidak ada antrean perubahan.'),
-      decided.length ? h('details', {}, h('summary', {}, `Riwayat keputusan (${decided.length})`), decided.map(crDone)) : null);
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+          h('h2', {}, 'Change Requests'),
+          pending.length > 0 && h('span', { class: 'pill', style: { marginLeft: 0 } }, pending.length)),
+        h('button', { class: 'btn xs primary', onclick: () => crDialog() }, '+ Ajukan CR')),
+      h('div', { class: 'cr-explainer' },
+        'Pintu kendali scope: catat permintaan tambahan fitur dari stakeholder di sini, lalu putuskan apakah wajib masuk phase berjalan, digeser ke phase berikutnya, atau ditolak.'),
+      pending.length
+        ? pending.map(crCard)
+        : h('p', { class: 'empty', style: { padding: '14px 8px' } }, 'Tidak ada pengajuan perubahan yang menunggu keputusan.'),
+      decided.length ? h('details', { open: !pending.length }, h('summary', {}, `Riwayat Keputusan (${decided.length})`), decided.map(crDone)) : null);
   }
 
   function timelineView() {
@@ -921,7 +1390,7 @@
   }
 
   /* ======================= KANBAN ======================= */
-  const taskText = (t) => `${t.title} ${t.assignee} ${t.desc}`.toLowerCase();
+  const taskText = (t) => `${t.title} ${t.assignee} ${t.desc} ${blockersOf(t).map((b) => b.text).join(' ')}`.toLowerCase();
   const moveTask = safe((id, status, index) => mutate('POST', `/api/tasks/${id}/move`, { status, index }));
 
   function clearDrop() { document.querySelectorAll('.drop-line').forEach((e) => e.remove()); }
@@ -940,13 +1409,19 @@
   function taskCard(t) {
     const over = t.due && t.status !== 'done' && t.due < todayStr();
     const idx = STATUSES.findIndex((s) => s[0] === t.status);
+    const linksCount = (t.links || []).length;
+    const commentsCount = (t.comments || []).length;
+    const bCount = blockersOf(t).length;
     const mv = (to, label) => h('button', {
       title: 'Pindah ke ' + STATUSES[to][1], 'aria-label': label,
       onclick: (e) => { e.stopPropagation(); moveTask(t.id, STATUSES[to][0]); },
     }, label);
+
     return h('div', {
-      class: 'tcard prio-' + t.priority, draggable: 'true', dataset: { id: t.id, q: taskText(t) },
-      onclick: () => editTaskDialog(t),
+      class: 'tcard prio-' + t.priority + (bCount ? ' has-blocker' : ''),
+      draggable: 'true',
+      dataset: { id: t.id, q: taskText(t) },
+      onclick: () => openTaskDrawer(t),
       ondragstart: (e) => {
         dragging = true; dragId = t.id;
         e.dataTransfer.effectAllowed = 'move';
@@ -957,6 +1432,9 @@
     },
     h('div', { class: 'tt' }, t.title),
     h('div', { class: 'tmeta' },
+      bCount > 0 && badge(bCount > 1 ? `${bCount} Blocker` : 'Blocker', 'over'),
+      commentsCount > 0 && badge(`${commentsCount} Komentar`, ''),
+      linksCount > 0 && badge(`${linksCount} Link`, ''),
       t.origin === 'change' && badge('CR', 'cr'),
       t.priority === 'high' && badge('High', 'prio-high'),
       t.due && badge(fmtShort(t.due), over ? 'over' : ''),
@@ -1023,7 +1501,7 @@
         ph.locked && badge('Locked', 'lock'),
         h('button', { class: 'btn small ghost', onclick: () => { ui.view = 'timeline'; store.set('view', 'timeline'); render(); setTimeout(() => jumpToPhase(ph.id), 40); } }, '← Timeline'),
         h('input', {
-          type: 'search', placeholder: 'Filter task…', value: ui.q, 'aria-label': 'Filter task',
+          type: 'search', placeholder: 'Filter task / blocker…', value: ui.q, 'aria-label': 'Filter task',
           oninput: (e) => { ui.q = e.target.value; applyFilter(); },
         }),
         ph.locked
@@ -1035,6 +1513,16 @@
   /* ======================= RENDER & INIT ======================= */
   function render() {
     const y = window.scrollY;
+    const drawerBody = document.querySelector('.drawer-body');
+    const dy = drawerBody ? drawerBody.scrollTop : 0;
+
+    updateUserButton();
+    if (ui.needLogin) {
+      $('#app').replaceChildren(loginView());
+      renderDrawer();
+      return;
+    }
+
     $('#app').replaceChildren(ui.view === 'kanban' ? kanbanView() : timelineView());
     document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.view === ui.view));
     const pend = S.changes.filter((c) => c.status === 'pending').length;
@@ -1042,6 +1530,9 @@
     pb.textContent = pend;
     pb.hidden = !pend;
     if (ui.view === 'kanban') applyFilter();
+    renderDrawer();
+    const newDrawerBody = document.querySelector('.drawer-body');
+    if (newDrawerBody && dy) newDrawerBody.scrollTop = dy;
     window.scrollTo(0, y);
   }
 
@@ -1051,6 +1542,10 @@
       ui.theme = ui.theme === 'dark' ? 'light' : 'dark';
       store.set('theme', ui.theme);
       applyTheme();
+    });
+    $('#btn-user').addEventListener('click', () => {
+      if (ui.needLogin) return;
+      userDialog();
     });
     $('#tabs').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-view]');
@@ -1074,10 +1569,15 @@
     }));
     const dlg = $('#dlg');
     dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
+    const backdrop = $('#drawer-backdrop');
+    if (backdrop) backdrop.addEventListener('click', closeTaskDrawer);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && ui.drawerTaskId && !dlg.open) closeTaskDrawer();
+    });
     document.addEventListener('dragend', () => { dragging = false; dragId = null; clearDrop(); }, true);
 
     setInterval(async () => {
-      if (document.hidden || dragging || dlg.open) return;
+      if (document.hidden || dragging || dlg.open || ui.drawerTaskId || ui.needLogin) return;
       const a = document.activeElement;
       if (a && a.closest && a.closest('#app') && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.value) return;
       try {
@@ -1087,7 +1587,9 @@
     }, 15000);
 
     api('GET', '/api/state').then((d) => { S = d; render(); }).catch((e) => {
-      $('#app').replaceChildren(h('p', { class: 'empty' }, 'Gagal memuat data: ' + e.message));
+      if (!ui.needLogin) {
+        $('#app').replaceChildren(h('p', { class: 'empty' }, 'Gagal memuat data: ' + e.message));
+      }
     });
   }
 

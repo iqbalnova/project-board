@@ -9,14 +9,57 @@ const path = require('path');
 const zlib = require('zlib');
 const crypto = require('crypto');
 
+// Muat file .env lokal secara otomatis jika ada (tanpa dependency dotenv)
+const ENV_FILE = path.join(__dirname, '.env');
+if (fs.existsSync(ENV_FILE)) {
+  for (const line of fs.readFileSync(ENV_FILE, 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq < 1) continue;
+    const k = trimmed.slice(0, eq).trim();
+    let v = trimmed.slice(eq + 1).trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+    if (process.env[k] === undefined) process.env[k] = v;
+  }
+}
+
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const DB_FILE = path.join(DATA_DIR, 'db.json');
-const APP_USER = process.env.APP_USER || 'admin';
-const APP_PASSWORD = process.env.APP_PASSWORD || '';
 const MAX_BODY = 5 * 1024 * 1024;
 const LOG_LIMIT = 500;
 const DAY = 86400000;
+
+/* ---------- multi-user dari environment variable ---------- */
+// Format APP_USERS: "iqbal:pass123,budi:pass456,sari:pass789" (mendukung pemisah koma, titik koma, atau baris baru)
+// Tetap kompatibel dengan APP_USER & APP_PASSWORD tunggal.
+function loadUsersFromEnv() {
+  const map = new Map();
+  const rawList = process.env.APP_USERS || '';
+  for (const part of rawList.split(/[,;\r\n]+/)) {
+    const item = part.trim();
+    if (!item) continue;
+    const idx = item.indexOf(':');
+    if (idx <= 0) continue;
+    const u = item.slice(0, idx).trim();
+    const p = item.slice(idx + 1).trim();
+    if (u && p) map.set(u, p);
+  }
+  const singleUser = (process.env.APP_USER || 'admin').trim();
+  const singlePass = (process.env.APP_PASSWORD || '').trim();
+  if (singlePass && !map.has(singleUser)) {
+    map.set(singleUser, singlePass);
+  }
+  return map;
+}
+
+const USERS = loadUsersFromEnv();
+const AUTH_REQUIRED = USERS.size > 0;
+const TOKEN_SECRET = crypto
+  .createHash('sha256')
+  .update(AUTH_REQUIRED ? Array.from(USERS.entries()).map(([u, p]) => `${u}:${p}`).join('|') : 'open-mode-secret')
+  .digest();
 
 const TASK_STATUS = ['todo', 'doing', 'review', 'done'];
 const PRIORITY = ['low', 'medium', 'high'];
@@ -64,8 +107,39 @@ function normalize(d) {
   const ids = new Set(phases.map((p) => p.id));
   const tasks = (d.tasks || []).map((t, i) => {
     if (!t || !t.id || !str(t.title) || !ids.has(t.phaseId)) throw new Error(`task #${i + 1} tidak valid`);
+    const links = Array.isArray(t.links)
+      ? t.links.filter((l) => l && str(l.url, 1000)).slice(0, 20).map((l) => ({
+          id: String(l.id || uid()),
+          title: str(l.title, 120) || str(l.url, 120),
+          url: str(l.url, 1000),
+        }))
+      : [];
+    const rawComments = Array.isArray(t.comments) ? t.comments : (Array.isArray(t.updates) ? t.updates : []);
+    const comments = rawComments
+      .filter((c) => c && str(c.text, 1000))
+      .slice(0, 100)
+      .map((c) => ({
+        id: String(c.id || uid()),
+        user: str(c.user || c.role, 60) || 'user',
+        text: str(c.text, 1000),
+        ts: typeof c.ts === 'string' ? c.ts : now(),
+      }));
+    const rawBlockers = Array.isArray(t.blockers)
+      ? t.blockers
+      : (typeof t.blocker === 'string' && t.blocker.trim() ? [{ id: uid(), text: t.blocker.trim(), by: 'tim', ts: t.updatedAt || now() }] : []);
+    const blockers = rawBlockers
+      .filter((b) => b && str(b.text, 500))
+      .slice(0, 30)
+      .map((b) => ({
+        id: String(b.id || uid()),
+        text: str(b.text, 500),
+        by: str(b.by, 60) || 'tim',
+        ts: typeof b.ts === 'string' ? b.ts : now(),
+      }));
     return {
       id: String(t.id), phaseId: t.phaseId, title: str(t.title, 200), desc: str(t.desc, 4000),
+      blockers,
+      links, comments,
       status: TASK_STATUS.includes(t.status) ? t.status : 'todo',
       priority: PRIORITY.includes(t.priority) ? t.priority : 'medium',
       assignee: str(t.assignee, 60), due: isDate(t.due) ? t.due : '',
@@ -120,12 +194,81 @@ function save() {
   const tmp = DB_FILE + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(db, null, 1));
   if (Date.now() - lastBackup > 3600e3) backupNow();
-  fs.renameSync(tmp, DB_FILE); // atomic: file tidak pernah setengah tertulis
+  fs.renameSync(tmp, DB_FILE);
 }
 
-function addLog(text) {
-  db.log.unshift({ ts: now(), text });
+function addLog(text, user) {
+  const suffix = user ? ` (oleh ${user})` : '';
+  db.log.unshift({ ts: now(), text: text + suffix });
   if (db.log.length > LOG_LIMIT) db.log.length = LOG_LIMIT;
+}
+
+/* ---------- auth & session helper ---------- */
+const safeEq = (a, b) => crypto.timingSafeEqual(
+  crypto.createHash('sha256').update(String(a)).digest(),
+  crypto.createHash('sha256').update(String(b)).digest(),
+);
+
+function signUser(username) {
+  const sig = crypto.createHmac('sha256', TOKEN_SECRET).update(username).digest('base64url');
+  return `${encodeURIComponent(username)}.${sig}`;
+}
+
+function verifyToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const dot = token.lastIndexOf('.');
+  if (dot <= 0) return null;
+  let username;
+  try { username = decodeURIComponent(token.slice(0, dot)); } catch (_) { return null; }
+  const sig = token.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', TOKEN_SECRET).update(username).digest('base64url');
+  if (!safeEq(sig, expected)) return null;
+  if (AUTH_REQUIRED && !USERS.has(username)) return null;
+  return username;
+}
+
+function parseCookies(req) {
+  const out = {};
+  const raw = req.headers.cookie || '';
+  for (const part of raw.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq > 0) out[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
+  }
+  return out;
+}
+
+function checkCredentials(username, password) {
+  for (const [u, p] of USERS.entries()) {
+    if (safeEq(u, username) && safeEq(p, password)) return u;
+  }
+  return null;
+}
+
+function getAuthUser(req) {
+  const cookies = parseCookies(req);
+  if (cookies.pb_session) {
+    const u = verifyToken(cookies.pb_session);
+    if (u) return u;
+  }
+  const h = req.headers.authorization || '';
+  if (h.startsWith('Basic ')) {
+    const raw = Buffer.from(h.slice(6), 'base64').toString('utf8');
+    const i = raw.indexOf(':');
+    if (i >= 0) {
+      const u = raw.slice(0, i);
+      const p = raw.slice(i + 1);
+      if (AUTH_REQUIRED) {
+        const matched = checkCredentials(u, p);
+        if (matched) return matched;
+      } else if (u.trim()) {
+        return str(u, 60);
+      }
+    }
+  }
+  if (!AUTH_REQUIRED) {
+    return 'admin';
+  }
+  return null;
 }
 
 /* ---------- domain helpers ---------- */
@@ -141,7 +284,6 @@ function nextPhaseOf(id) {
   return s.slice(i + 1).find((p) => p.status !== 'done') || null;
 }
 
-// Geser semua phase setelah `p` sebanyak n hari (dipanggil sebelum tanggal p diubah).
 function shiftLater(p, n) {
   if (!n) return;
   const s = sortedPhases();
@@ -175,8 +317,39 @@ function taskFields(b, base = {}) {
   const m = { ...base, ...b };
   const title = str(m.title, 200);
   if (!title) throw bad('Judul wajib diisi');
+  const links = Array.isArray(m.links)
+    ? m.links.filter((l) => l && str(l.url, 1000)).slice(0, 20).map((l) => ({
+        id: String(l.id || uid()),
+        title: str(l.title, 120) || str(l.url, 120),
+        url: str(l.url, 1000),
+      }))
+    : (base.links || []);
+  const comments = Array.isArray(m.comments)
+    ? m.comments.filter((c) => c && str(c.text, 1000)).slice(0, 100).map((c) => ({
+        id: String(c.id || uid()),
+        user: str(c.user, 60) || 'user',
+        text: str(c.text, 1000),
+        ts: typeof c.ts === 'string' ? c.ts : now(),
+      }))
+    : (base.comments || []);
+  let blockers = base.blockers || [];
+  if (Array.isArray(m.blockers)) {
+    blockers = m.blockers
+      .filter((x) => x && str(x.text, 500))
+      .slice(0, 30)
+      .map((x) => ({
+        id: String(x.id || uid()),
+        text: str(x.text, 500),
+        by: str(x.by, 60) || 'tim',
+        ts: typeof x.ts === 'string' ? x.ts : now(),
+      }));
+  } else if (typeof b.blocker === 'string') {
+    blockers = b.blocker.trim() ? [{ id: uid(), text: str(b.blocker, 500), by: 'tim', ts: now() }] : [];
+  }
   return {
     title, desc: str(m.desc, 4000),
+    blockers,
+    links, comments,
     priority: PRIORITY.includes(m.priority) ? m.priority : 'medium',
     assignee: str(m.assignee, 60), due: isDate(m.due) ? m.due : '',
   };
@@ -194,9 +367,32 @@ function newTask(phase, fields, status, extra = {}) {
 const routes = [];
 const route = (method, pattern, fn) =>
   routes.push({ method, re: new RegExp('^' + pattern.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), fn });
-const saved = () => { save(); return db; };
 
-route('GET', '/api/state', () => db);
+const stateWithMeta = (user) => {
+  const userSet = new Set(['admin', ...Array.from(USERS.keys())]);
+  if (!USERS.size && fs.existsSync( path.join(__dirname, '.env.example') )) {
+    const ex = fs.readFileSync(path.join(__dirname, '.env.example'), 'utf8');
+    const m = ex.match(/APP_USERS=([^\r\n]+)/);
+    if (m) {
+      for (const part of m[1].split(/[,;]+/)) {
+        const u = part.split(':')[0].trim();
+        if (u) userSet.add(u);
+      }
+    }
+  }
+  if (user) userSet.add(user);
+  return {
+    ...db,
+    me: {
+      user,
+      authRequired: AUTH_REQUIRED,
+      users: Array.from(userSet),
+    },
+  };
+};
+const saved = (user) => { save(); return stateWithMeta(user); };
+
+route('GET', '/api/state', ({ user }) => stateWithMeta(user));
 route('GET', '/api/rev', () => ({ rev: db.rev }));
 
 route('GET', '/api/export', () => ({
@@ -208,39 +404,39 @@ route('GET', '/api/export', () => ({
   body: JSON.stringify(db, null, 1),
 }));
 
-route('POST', '/api/import', ({ body }) => {
+route('POST', '/api/import', ({ body, user }) => {
   let nd;
   try { nd = normalize(body); } catch (e) { throw bad('File backup tidak valid: ' + e.message); }
   backupNow();
   nd.rev = db.rev;
   db = nd;
-  addLog('Data diimpor dari file backup');
-  return saved();
+  addLog('Data diimpor dari file backup', user);
+  return saved(user);
 });
 
-route('POST', '/api/reset', ({ body }) => {
+route('POST', '/api/reset', ({ body, user }) => {
   backupNow();
   const rev = db.rev;
   if (body && body.mode === 'seed') {
     db = seed();
     db.rev = rev;
-    addLog('Database di-reset ke data awal (Phase 1)');
+    addLog('Database di-reset ke data awal (Phase 1)', user);
   } else {
     db = { rev, phases: [], tasks: [], changes: [], log: [] };
-    addLog('Database dikosongkan (Clear DB)');
+    addLog('Database dikosongkan (Clear DB)', user);
   }
-  return saved();
+  return saved(user);
 });
 
 /* phases */
-route('POST', '/api/phases', ({ body }) => {
+route('POST', '/api/phases', ({ body, user }) => {
   const p = { id: uid(), ...phaseInput(body), locked: false, approvedAt: null, baselineCount: 0 };
   db.phases.push(p);
-  addLog(`Phase "${p.name}" dibuat (${p.start} → ${p.end})`);
-  return saved();
+  addLog(`Phase "${p.name}" dibuat (${p.start} → ${p.end})`, user);
+  return saved(user);
 });
 
-route('PATCH', '/api/phases/:id', ({ params, body }) => {
+route('PATCH', '/api/phases/:id', ({ params, body, user }) => {
   const p = mustPhase(params.id);
   const f = phaseInput({ ...p, ...body });
   const delta = diffDays(p.end, f.end);
@@ -251,44 +447,45 @@ route('PATCH', '/api/phases/:id', ({ params, body }) => {
   Object.assign(p, f);
   addLog(moved
     ? `Timeline "${p.name}" berubah: ${old} menjadi ${p.start} → ${p.end}${cascaded ? `; phase berikutnya digeser ${cascaded > 0 ? '+' : ''}${cascaded} hari` : ''}`
-    : `Phase "${p.name}" diperbarui`);
-  return saved();
+    : `Phase "${p.name}" diperbarui`, user);
+  return saved(user);
 });
 
-route('DELETE', '/api/phases/:id', ({ params }) => {
+route('DELETE', '/api/phases/:id', ({ params, user }) => {
   const p = mustPhase(params.id);
-  if (db.tasks.some((t) => t.phaseId === p.id)) throw conflict('Phase masih punya task. Pindahkan atau hapus task-nya dulu.');
-  if (db.changes.some((c) => c.status === 'pending' && c.phaseId === p.id)) throw conflict('Masih ada change request yang menunggu keputusan di phase ini.');
+  const removedTasks = db.tasks.filter((t) => t.phaseId === p.id).length;
+  db.tasks = db.tasks.filter((t) => t.phaseId !== p.id);
+  db.changes = db.changes.filter((c) => !(c.status === 'pending' && c.phaseId === p.id));
   db.phases = db.phases.filter((x) => x.id !== p.id);
-  addLog(`Phase "${p.name}" dihapus`);
-  return saved();
+  addLog(`Phase "${p.name}" dihapus${removedTasks ? ` (beserta ${removedTasks} item scope)` : ''}`, user);
+  return saved(user);
 });
 
-route('POST', '/api/phases/:id/lock', ({ params, body }) => {
+route('POST', '/api/phases/:id/lock', ({ params, body, user }) => {
   const p = mustPhase(params.id);
   const lock = !!body.locked;
-  if (lock === p.locked) return db;
+  if (lock === p.locked) return stateWithMeta(user);
   p.locked = lock;
   if (lock) {
     p.approvedAt = now();
     p.baselineCount = db.tasks.filter((t) => t.phaseId === p.id).length;
-    addLog(`Scope "${p.name}" DIKUNCI (${p.baselineCount} item disetujui sebagai baseline)`);
+    addLog(`Scope "${p.name}" DIKUNCI (${p.baselineCount} item disetujui sebagai baseline)`, user);
   } else {
-    addLog(`Kunci scope "${p.name}" dibuka kembali`);
+    addLog(`Kunci scope "${p.name}" dibuka kembali`, user);
   }
-  return saved();
+  return saved(user);
 });
 
 /* tasks */
-route('POST', '/api/tasks', ({ body }) => {
+route('POST', '/api/tasks', ({ body, user }) => {
   const phase = mustPhase(body.phaseId);
   if (phase.locked) throw conflict(`Scope "${phase.name}" sudah terkunci. Ajukan sebagai Change Request.`);
   const t = newTask(phase, taskFields(body), body.status);
-  addLog(`Item "${t.title}" ditambahkan ke ${phase.name}`);
-  return saved();
+  addLog(`Item "${t.title}" ditambahkan ke ${phase.name}`, user);
+  return saved(user);
 });
 
-route('PATCH', '/api/tasks/:id', ({ params, body }) => {
+route('PATCH', '/api/tasks/:id', ({ params, body, user }) => {
   const t = mustTask(params.id);
   Object.assign(t, taskFields(body, t));
   const want = TASK_STATUS.includes(body.status) ? body.status : t.status;
@@ -296,48 +493,86 @@ route('PATCH', '/api/tasks/:id', ({ params, body }) => {
     const to = mustPhase(body.phaseId);
     if (to.locked) throw conflict(`Scope "${to.name}" sudah terkunci. Ajukan sebagai Change Request.`);
     const from = findPhase(t.phaseId);
-    addLog(`Item "${t.title}" dipindah dari ${from ? from.name : '?'} ke ${to.name}${from && from.locked ? ' (scope phase asal berkurang)' : ''}`);
+    addLog(`Item "${t.title}" dipindah dari ${from ? from.name : '?'} ke ${to.name}${from && from.locked ? ' (scope phase asal berkurang)' : ''}`, user);
     t.phaseId = to.id;
     moveTask(t, want);
   } else if (want !== t.status) {
     moveTask(t, want);
   }
   t.updatedAt = now();
-  return saved();
+  return saved(user);
 });
 
-route('POST', '/api/tasks/:id/move', ({ params, body }) => {
+route('POST', '/api/tasks/:id/move', ({ params, body, user }) => {
   const t = mustTask(params.id);
   if (!TASK_STATUS.includes(body.status)) throw bad('Status tidak valid');
   moveTask(t, body.status, body.index);
-  return saved();
+  return saved(user);
 });
 
-route('DELETE', '/api/tasks/:id', ({ params }) => {
+/* blockers on task */
+route('POST', '/api/tasks/:id/blockers', ({ params, body, user }) => {
+  const t = mustTask(params.id);
+  const text = str(body.text, 500);
+  if (!text) throw bad('Isi catatan blocker tidak boleh kosong');
+  t.blockers = t.blockers || [];
+  t.blockers.push({ id: uid(), text, by: user || 'admin', ts: now() });
+  t.updatedAt = now();
+  return saved(user);
+});
+
+route('DELETE', '/api/tasks/:id/blockers/:bid', ({ params, user }) => {
+  const t = mustTask(params.id);
+  t.blockers = (t.blockers || []).filter((b) => b.id !== params.bid);
+  t.updatedAt = now();
+  return saved(user);
+});
+
+/* comments on task */
+route('POST', '/api/tasks/:id/comments', ({ params, body, user }) => {
+  const t = mustTask(params.id);
+  const text = str(body.text, 1000);
+  if (!text) throw bad('Isi komentar tidak boleh kosong');
+  const sender = user || str(body.user, 60) || 'user';
+  t.comments = t.comments || [];
+  t.comments.push({ id: uid(), user: sender, text, ts: now() });
+  t.updatedAt = now();
+  return saved(user);
+});
+
+route('DELETE', '/api/tasks/:id/comments/:cid', ({ params, user }) => {
+  const t = mustTask(params.id);
+  t.comments = (t.comments || []).filter((c) => c.id !== params.cid);
+  t.updatedAt = now();
+  return saved(user);
+});
+
+route('DELETE', '/api/tasks/:id', ({ params, user }) => {
   const t = mustTask(params.id);
   const p = findPhase(t.phaseId);
   db.tasks = db.tasks.filter((x) => x.id !== t.id);
-  addLog(`Item "${t.title}" dihapus dari ${p ? p.name : '?'}${p && p.locked ? ' (scope berkurang)' : ''}`);
-  return saved();
+  addLog(`Item "${t.title}" dihapus dari ${p ? p.name : '?'}${p && p.locked ? ' (scope berkurang)' : ''}`, user);
+  return saved(user);
 });
 
 /* change requests */
-route('POST', '/api/changes', ({ body }) => {
+route('POST', '/api/changes', ({ body, user }) => {
   const title = str(body.title, 200);
   if (!title) throw bad('Judul perubahan wajib diisi');
   const phase = mustPhase(body.phaseId);
   const c = {
-    id: uid(), title, desc: str(body.desc, 4000), requestedBy: str(body.requestedBy, 80), reason: str(body.reason, 1000),
+    id: uid(), title, desc: str(body.desc, 4000), requestedBy: str(body.requestedBy, 80) || user || '',
+    reason: str(body.reason, 1000),
     phaseId: phase.id, phaseName: phase.name, status: 'pending', decision: null,
     decidedPhaseId: null, decidedPhaseName: '', decisionNote: '', extendDays: 0, taskId: null,
     createdAt: now(), decidedAt: null,
   };
   db.changes.push(c);
-  addLog(`Change request "${c.title}" diajukan${c.requestedBy ? ' oleh ' + c.requestedBy : ''} (saat ${phase.name})`);
-  return saved();
+  addLog(`Change request "${c.title}" diajukan${c.requestedBy ? ' oleh ' + c.requestedBy : ''} (saat ${phase.name})`, user);
+  return saved(user);
 });
 
-route('POST', '/api/changes/:id/decide', ({ params, body }) => {
+route('POST', '/api/changes/:id/decide', ({ params, body, user }) => {
   const c = mustChange(params.id);
   if (c.status !== 'pending') throw conflict('Change request ini sudah diputuskan');
   const decision = body.decision;
@@ -346,8 +581,8 @@ route('POST', '/api/changes/:id/decide', ({ params, body }) => {
 
   if (decision === 'reject') {
     Object.assign(c, { status: 'rejected', decisionNote: note, decidedAt: now() });
-    addLog(`Change request "${c.title}" DITOLAK${note ? ': ' + note : ''}`);
-    return saved();
+    addLog(`Change request "${c.title}" DITOLAK${note ? ': ' + note : ''}`, user);
+    return saved(user);
   }
 
   let target;
@@ -357,6 +592,17 @@ route('POST', '/api/changes/:id/decide', ({ params, body }) => {
     if (!note) throw bad('Isi alasan kenapa perubahan ini wajib masuk phase sekarang');
   } else {
     target = nextPhaseOf(c.phaseId);
+    if (!target && body.autoCreateNext) {
+      const s = sortedPhases();
+      const last = s[s.length - 1];
+      const start = last ? addDays(last.end, 1) : todayStr();
+      target = {
+        id: uid(), name: `Phase ${s.length + 1}`, goal: 'Lanjutan & Change Request',
+        start, end: addDays(start, 13), status: 'planned', locked: false, approvedAt: null, baselineCount: 0,
+      };
+      db.phases.push(target);
+      addLog(`Phase baru "${target.name}" otomatis dibuat untuk menampung Change Request`, user);
+    }
     if (!target) throw bad('Belum ada phase berikutnya. Buat phase baru dulu di Timeline.');
   }
 
@@ -376,16 +622,16 @@ route('POST', '/api/changes/:id/decide', ({ params, body }) => {
   });
   addLog(decision === 'current'
     ? `Change request "${c.title}" DISETUJUI masuk ${target.name} (wajib: ${note})${extend ? `; timeline +${extend} hari${body.cascade ? ', phase berikutnya ikut geser' : ''}` : ''}`
-    : `Change request "${c.title}" DIGESER ke ${target.name}${note ? ': ' + note : ''}`);
-  return saved();
+    : `Change request "${c.title}" DIGESER ke ${target.name}${note ? ': ' + note : ''}`, user);
+  return saved(user);
 });
 
-route('DELETE', '/api/changes/:id', ({ params }) => {
+route('DELETE', '/api/changes/:id', ({ params, user }) => {
   const c = mustChange(params.id);
   if (c.status !== 'pending') throw conflict('Hanya permintaan yang masih menunggu yang bisa dihapus');
   db.changes = db.changes.filter((x) => x.id !== c.id);
-  addLog(`Change request "${c.title}" ditarik/dihapus`);
-  return saved();
+  addLog(`Change request "${c.title}" ditarik/dihapus`, user);
+  return saved(user);
 });
 
 /* ---------- static files ---------- */
@@ -416,28 +662,14 @@ function send(res, status, body, headers = {}) {
   res.writeHead(status, { ...SECURITY, ...headers });
   res.end(body);
 }
-const sendJson = (res, status, obj) => send(res, status, JSON.stringify(obj), { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+const sendJson = (res, status, obj, extraHeaders = {}) =>
+  send(res, status, JSON.stringify(obj), { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...extraHeaders });
 
 function serveAsset(req, res, a) {
   const headers = { 'Content-Type': a.type, 'Cache-Control': 'no-cache', ETag: a.etag, Vary: 'Accept-Encoding' };
   if (req.headers['if-none-match'] === a.etag) return send(res, 304, null, headers);
   if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) return send(res, 200, a.gz, { ...headers, 'Content-Encoding': 'gzip' });
   return send(res, 200, a.raw, headers);
-}
-
-const safeEq = (a, b) => crypto.timingSafeEqual(
-  crypto.createHash('sha256').update(a).digest(),
-  crypto.createHash('sha256').update(b).digest(),
-);
-
-function authorized(req) {
-  if (!APP_PASSWORD) return true;
-  const h = req.headers.authorization || '';
-  if (!h.startsWith('Basic ')) return false;
-  const raw = Buffer.from(h.slice(6), 'base64').toString('utf8');
-  const i = raw.indexOf(':');
-  if (i < 0) return false;
-  return safeEq(raw.slice(0, i), APP_USER) && safeEq(raw.slice(i + 1), APP_PASSWORD);
 }
 
 function readBody(req) {
@@ -462,14 +694,41 @@ const server = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url, 'http://localhost');
     if (pathname === '/healthz') return send(res, 200, 'ok', { 'Content-Type': 'text/plain' });
 
-    if (!authorized(req)) {
-      return send(res, 401, 'Butuh login', {
-        'WWW-Authenticate': 'Basic realm="Kanban Timeline", charset="UTF-8"',
-        'Content-Type': 'text/plain; charset=utf-8',
+    // Static assets selalu dapat diakses agar halaman Login in-app bisa dimuat
+    if (req.method === 'GET' && assets[pathname]) return serveAsset(req, res, assets[pathname]);
+
+    // Endpoint Login & Logout
+    if (pathname === '/api/login' && req.method === 'POST') {
+      if (!/^application\/json/i.test(req.headers['content-type'] || '')) throw new HttpError(415, 'Content-Type harus application/json');
+      const body = await readBody(req);
+      const username = str(body.username, 60);
+      const password = typeof body.password === 'string' ? body.password : '';
+      if (!username) throw bad('Username wajib diisi');
+
+      let validUser = username;
+      if (AUTH_REQUIRED) {
+        validUser = checkCredentials(username, password);
+        if (!validUser) throw new HttpError(401, 'Username atau password salah');
+      }
+      const token = signUser(validUser);
+      return sendJson(res, 200, stateWithMeta(validUser), {
+        'Set-Cookie': `pb_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
       });
     }
 
-    if (req.method === 'GET' && assets[pathname]) return serveAsset(req, res, assets[pathname]);
+    if (pathname === '/api/logout' && req.method === 'POST') {
+      return sendJson(res, 200, { ok: true, authRequired: AUTH_REQUIRED }, {
+        'Set-Cookie': 'pb_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
+      });
+    }
+
+    const user = getAuthUser(req);
+    if (!user) {
+      return sendJson(res, 401, {
+        error: 'Butuh login',
+        authRequired: true,
+      });
+    }
 
     if (pathname.startsWith('/api/')) {
       for (const r of routes) {
@@ -478,12 +737,11 @@ const server = http.createServer(async (req, res) => {
         if (!m) continue;
         let body = {};
         if (req.method !== 'GET') {
-          // Wajib JSON: mencegah CSRF lintas-situs (form biasa tidak bisa kirim content-type ini tanpa preflight)
           if (!/^application\/json/i.test(req.headers['content-type'] || '')) throw new HttpError(415, 'Content-Type harus application/json');
           body = await readBody(req);
           if (!body || typeof body !== 'object' || Array.isArray(body)) throw bad('Body harus berupa objek JSON');
         }
-        const out = r.fn({ params: m.groups || {}, body, req });
+        const out = r.fn({ params: m.groups || {}, body, req, user });
         if (out && out.__send) return send(res, out.status, out.body, out.headers);
         return sendJson(res, 200, out);
       }
@@ -501,7 +759,11 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Kanban Timeline berjalan di port ${PORT}`);
   console.log(`Data: ${DB_FILE}`);
-  if (!APP_PASSWORD) console.warn('[!] APP_PASSWORD kosong: aplikasi terbuka untuk siapa saja yang tahu URL-nya.');
+  if (AUTH_REQUIRED) {
+    console.log(`Multi-user aktif (${USERS.size} akun terdaftar dari env APP_USERS/APP_PASSWORD): ${Array.from(USERS.keys()).join(', ')}`);
+  } else {
+    console.warn('[!] APP_USERS / APP_PASSWORD kosong: mode terbuka (user bisa ganti nama langsung di UI).');
+  }
 });
 
 for (const sig of ['SIGTERM', 'SIGINT']) {

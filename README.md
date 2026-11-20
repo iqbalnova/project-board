@@ -54,8 +54,9 @@ Kalau memakai bind mount (`-v /path/di/host:/data`), pastikan foldernya bisa dit
 |---|---|---|
 | `PORT` | `3000` | Port HTTP |
 | `DATA_DIR` | `./data` (di Docker: `/data`) | Folder penyimpanan `db.json` |
-| `APP_PASSWORD` | *(kosong)* | Jika diisi, semua akses dilindungi Basic Auth. **Wajib diisi kalau server bisa diakses publik.** |
-| `APP_USER` | `admin` | Username Basic Auth |
+| `APP_USERS` | *(kosong)* | Multi-user login dengan format `user1:pass1,user2:pass2` (misal: `iqbal:rahasia123,budi:dev123`). Nama user dipakai otomatis pada komentar & riwayat. |
+| `APP_PASSWORD` | *(kosong)* | Opsional (fallback single-user jika `APP_USERS` tidak diisi). |
+| `APP_USER` | `admin` | Username single-user untuk `APP_PASSWORD`. |
 
 Pasang reverse proxy dengan HTTPS (Caddy/Nginx/Traefik) di depan aplikasi ini, karena Basic Auth mengirim password tanpa enkripsi lewat HTTP biasa.
 
