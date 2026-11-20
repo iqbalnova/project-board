@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Project Board</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234f46e5'/%3E%3Cpath d='M8 9h4v14H8zM14 9h4v9h-4zM20 9h4v6h-4z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Project Board</div>
+    <nav class="tabs" id="tabs">
+      <button data-view="timeline">Timeline <span id="pending-badge" class="pill" hidden></span></button>
+      <button data-view="kanban">Kanban</button>
+    </nav>
+    <div class="actions">
+      <button class="btn ghost" id="btn-log" title="Riwayat perubahan scope &amp; timeline">Riwayat</button>
+      <button class="btn ghost" id="btn-export" title="Unduh backup data (JSON)">Export</button>
+      <label class="btn ghost" title="Pulihkan dari file backup">Import<input type="file" id="file-import" accept="application/json,.json" hidden></label>
+    </div>
+  </header>
+
+  <main id="app"><p class="empty">Memuat…</p></main>
+
+  <dialog id="dlg"></dialog>
+  <div id="toast" role="status"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

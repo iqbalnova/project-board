@@ -1,0 +1,13 @@
+{
+  "name": "project-board",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Kanban + Timeline phase dengan change request. Tanpa dependency.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

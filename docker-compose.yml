@@ -1,0 +1,17 @@
+services:
+  board:
+    build: .
+    container_name: project-board
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      APP_USER: admin
+      APP_PASSWORD: ${APP_PASSWORD:-}   # isi lewat file .env atau environment panel hosting
+    volumes:
+      - board-data:/data
+    mem_limit: 256m
+    cpus: 0.5
+
+volumes:
+  board-data:
