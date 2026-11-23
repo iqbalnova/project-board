@@ -22,8 +22,9 @@
     </nav>
     <div class="actions">
       <button class="btn small" id="btn-user" title="Akun aktif / Ganti user">User</button>
+      <button class="btn ghost icon-only" id="btn-notif" title="Notifikasi perubahan" aria-label="Notifikasi perubahan"></button>
       <button class="btn ghost icon-only" id="btn-theme" title="Ganti tema" aria-label="Ganti tema"></button>
-      <button class="btn ghost small" id="btn-log" title="Riwayat perubahan">Riwayat</button>
+      <button class="btn ghost small" id="btn-log" title="Riwayat perubahan">Riwayat <span id="log-badge" class="pill" hidden></span></button>
       <button class="btn ghost small" id="btn-export" title="Unduh backup JSON">Export</button>
       <label class="btn ghost small" title="Pulihkan dari file backup">Import<input type="file" id="file-import" accept="application/json,.json" hidden></label>
       <button class="btn ghost small danger-text" id="btn-reset" title="Reset database">Clear DB</button>
@@ -35,6 +36,7 @@
   <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
   <aside id="drawer" class="drawer" aria-label="Detail Scope &amp; Workspace Tim" hidden></aside>
   <dialog id="dlg"></dialog>
+  <div id="notif-stack" class="notif-stack" aria-live="polite"></div>
   <div id="toast" role="status"></div>
 
   <script src="/app.js"></script>

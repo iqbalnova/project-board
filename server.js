@@ -169,7 +169,15 @@ function normalize(d) {
       taskId: c.taskId || null, createdAt: c.createdAt || now(), decidedAt: c.decidedAt || null,
     };
   });
-  const log = (d.log || []).filter((l) => l && typeof l.ts === 'string' && typeof l.text === 'string').slice(0, LOG_LIMIT);
+  const log = (d.log || [])
+    .filter((l) => l && typeof l.ts === 'string' && typeof l.text === 'string')
+    .slice(0, LOG_LIMIT)
+    .map((l) => ({
+      ts: l.ts,
+      text: l.text,
+      by: typeof l.by === 'string' ? l.by : '',
+      taskId: typeof l.taskId === 'string' ? l.taskId : null,
+    }));
   return { rev: Number.isInteger(d.rev) ? d.rev : 1, phases, tasks, changes, log };
 }
 
@@ -206,9 +214,9 @@ function save() {
   fs.renameSync(tmp, DB_FILE);
 }
 
-function addLog(text, user) {
+function addLog(text, user, taskId = null) {
   const suffix = user ? ` (oleh ${user})` : '';
-  db.log.unshift({ ts: now(), text: text + suffix });
+  db.log.unshift({ ts: now(), text: text + suffix, by: user || '', taskId: taskId || null });
   if (db.log.length > LOG_LIMIT) db.log.length = LOG_LIMIT;
 }
 
@@ -417,7 +425,7 @@ const stateWithMeta = (user) => {
 const saved = (user) => { save(); return stateWithMeta(user); };
 
 route('GET', '/api/state', ({ user }) => stateWithMeta(user));
-route('GET', '/api/rev', () => ({ rev: db.rev }));
+route('GET', '/api/rev', () => ({ rev: db.rev, latestLog: db.log[0] || null }));
 
 route('GET', '/api/export', () => ({
   __send: true, status: 200,
@@ -507,23 +515,36 @@ route('POST', '/api/tasks', ({ body, user }) => {
   const phase = mustPhase(body.phaseId);
   if (phase.locked) throw conflict(`Scope "${phase.name}" sudah terkunci. Ajukan sebagai Change Request.`);
   const t = newTask(phase, taskFields(body), body.status);
-  addLog(`Item "${t.title}" ditambahkan ke ${phase.name}`, user);
+  addLog(`Item "${t.title}" ditambahkan ke ${phase.name}`, user, t.id);
   return saved(user);
 });
 
 route('PATCH', '/api/tasks/:id', ({ params, body, user }) => {
   const t = mustTask(params.id);
+  const oldStatus = t.status;
+  const oldTitle = t.title;
   Object.assign(t, taskFields(body, t));
   const want = TASK_STATUS.includes(body.status) ? body.status : t.status;
   if (body.phaseId && body.phaseId !== t.phaseId) {
     const to = mustPhase(body.phaseId);
     if (to.locked) throw conflict(`Scope "${to.name}" sudah terkunci. Ajukan sebagai Change Request.`);
     const from = findPhase(t.phaseId);
-    addLog(`Item "${t.title}" dipindah dari ${from ? from.name : '?'} ke ${to.name}${from && from.locked ? ' (scope phase asal berkurang)' : ''}`, user);
+    addLog(`Item "${t.title}" dipindah dari ${from ? from.name : '?'} ke ${to.name}${from && from.locked ? ' (scope phase asal berkurang)' : ''}`, user, t.id);
     t.phaseId = to.id;
     moveTask(t, want);
-  } else if (want !== t.status) {
+  } else if (want !== oldStatus) {
     moveTask(t, want);
+    addLog(`Status "${t.title}" diubah ke ${want.toUpperCase()}`, user, t.id);
+  } else if (body.assignees !== undefined) {
+    addLog(`PIC "${t.title}" diperbarui: ${t.assignees.join(', ') || 'kosong'}`, user, t.id);
+  } else if (body.due !== undefined) {
+    addLog(`Deadline "${t.title}" diubah ke ${t.due || 'kosong'}`, user, t.id);
+  } else if (body.links !== undefined) {
+    addLog(`Link Doksli pada "${t.title}" diperbarui`, user, t.id);
+  } else if (body.desc !== undefined) {
+    addLog(`Deskripsi "${t.title}" diperbarui`, user, t.id);
+  } else if (body.title !== undefined && t.title !== oldTitle) {
+    addLog(`Judul card diubah menjadi "${t.title}"`, user, t.id);
   }
   t.updatedAt = now();
   return saved(user);
@@ -532,7 +553,11 @@ route('PATCH', '/api/tasks/:id', ({ params, body, user }) => {
 route('POST', '/api/tasks/:id/move', ({ params, body, user }) => {
   const t = mustTask(params.id);
   if (!TASK_STATUS.includes(body.status)) throw bad('Status tidak valid');
+  const oldStatus = t.status;
   moveTask(t, body.status, body.index);
+  if (body.status !== oldStatus) {
+    addLog(`Status "${t.title}" dipindah ke ${body.status.toUpperCase()}`, user, t.id);
+  }
   return saved(user);
 });
 
@@ -544,6 +569,7 @@ route('POST', '/api/tasks/:id/blockers', ({ params, body, user }) => {
   t.blockers = t.blockers || [];
   t.blockers.push({ id: uid(), text, by: user || 'admin', ts: now() });
   t.updatedAt = now();
+  addLog(`Blocker baru pada "${t.title}": "${str(text, 80)}"`, user, t.id);
   return saved(user);
 });
 
@@ -551,6 +577,7 @@ route('DELETE', '/api/tasks/:id/blockers/:bid', ({ params, user }) => {
   const t = mustTask(params.id);
   t.blockers = (t.blockers || []).filter((b) => b.id !== params.bid);
   t.updatedAt = now();
+  addLog(`Blocker pada "${t.title}" diselesaikan`, user, t.id);
   return saved(user);
 });
 
@@ -563,6 +590,7 @@ route('POST', '/api/tasks/:id/comments', ({ params, body, user }) => {
   t.comments = t.comments || [];
   t.comments.push({ id: uid(), user: sender, text, ts: now() });
   t.updatedAt = now();
+  addLog(`Komentar pada "${t.title}": "${str(text, 80)}"`, sender, t.id);
   return saved(user);
 });
 
@@ -722,6 +750,10 @@ const server = http.createServer(async (req, res) => {
 
     // Static assets selalu dapat diakses agar halaman Login in-app bisa dimuat
     if (req.method === 'GET' && assets[pathname]) return serveAsset(req, res, assets[pathname]);
+    // Deep-link path param untuk card (/card/:id) disajikan sebagai SPA index.html
+    if (req.method === 'GET' && /^\/card\/[a-zA-Z0-9_-]+\/?$/.test(pathname)) {
+      return serveAsset(req, res, assets['/']);
+    }
 
     // Endpoint Login & Logout
     if (pathname === '/api/login' && req.method === 'POST') {

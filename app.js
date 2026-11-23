@@ -17,6 +17,11 @@
     set(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* abaikan */ } },
   };
 
+  function parseCardIdFromPath() {
+    const m = window.location.pathname.match(/^\/card\/([a-zA-Z0-9_-]+)\/?$/);
+    return m ? m[1] : null;
+  }
+
   let S = { rev: 0, phases: [], tasks: [], changes: [], log: [], me: { user: 'admin', authRequired: false, users: ['admin'] } };
   const ui = {
     view: store.get('view') === 'kanban' ? 'kanban' : 'timeline',
@@ -24,6 +29,7 @@
     q: '',
     refocus: null,
     drawerTaskId: null,
+    pendingRouteTaskId: parseCardIdFromPath(),
     drawerRefocusComment: false,
     addingBlocker: false,
     needLogin: false,
@@ -32,13 +38,18 @@
     scaleMode: store.get('scaleMode') || '1d',
     pxPerDay: Number(store.get('pxPerDay')) || 42,
     scrollLeft: 0,
+    notifEnabled: store.get('notifEnabled') !== '0',
+    unreadLogs: 0,
+    lastSeenLogTs: '',
   };
   let dragging = false;
   let dragId = null;
 
-  /* ======================= TEMA ======================= */
+  /* ======================= TEMA & NOTIFIKASI ICON ======================= */
   const SUN_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>';
   const MOON_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+  const BELL_ON_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>';
+  const BELL_OFF_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.73 21a2 2 0 0 1-3.46 0"/><path d="M18.63 13A17.89 17.89 0 0 1 18 8"/><path d="M6.26 6.26A5.86 5.86 0 0 0 6 8c0 7-3 9-3 9h14"/><path d="M18 8a6 6 0 0 0-9.33-5"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
 
   function applyTheme() {
     document.documentElement.dataset.theme = ui.theme;
@@ -49,6 +60,38 @@
       btn.title = isDark ? 'Mode Gelap (Klik untuk beralih ke Mode Terang)' : 'Mode Terang (Klik untuk beralih ke Mode Gelap)';
       btn.setAttribute('aria-label', btn.title);
     }
+  }
+
+  function updateNotifButton() {
+    const btn = document.getElementById('btn-notif');
+    if (!btn) return;
+    const browserPerm = ('Notification' in window) ? Notification.permission : 'unsupported';
+    const on = ui.notifEnabled;
+    btn.innerHTML = on ? BELL_ON_ICON : BELL_OFF_ICON;
+    btn.classList.toggle('is-on', on);
+    const permTxt = browserPerm === 'granted' ? 'Notifikasi Desktop & In-App Aktif' : 'Notifikasi In-App Aktif (Klik untuk izinkan Notifikasi Desktop)';
+    btn.title = on ? `${permTxt} · Klik untuk matikan/aktifkan` : 'Notifikasi Nonaktif (Klik untuk aktifkan)';
+    btn.setAttribute('aria-label', btn.title);
+  }
+
+  function playNotifChime() {
+    if (!ui.notifEnabled) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.08); // A5
+      gain.gain.setValueAtTime(0.06, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.28);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.29);
+    } catch (_) { /* abaikan jika autoplay diblokir browser */ }
   }
 
   function updateUserButton() {
@@ -197,6 +240,7 @@
     const vp = document.querySelector('.g-viewport');
     if (vp) ui.scrollLeft = vp.scrollLeft;
     S = await api(method, url, body);
+    if (S.log && S.log[0]) ui.lastSeenLogTs = S.log[0].ts;
     ui.needLogin = false;
     render();
   }
@@ -215,10 +259,65 @@
     const vp = document.querySelector('.g-viewport');
     if (vp) ui.scrollLeft = vp.scrollLeft;
     S = await api('GET', '/api/state');
+    if (S.log && S.log[0]) ui.lastSeenLogTs = S.log[0].ts;
     ui.needLogin = false;
     render();
     if (showMsg) toast('Data diperbarui');
   });
+
+  function updateLogBadge() {
+    const lb = document.getElementById('log-badge');
+    if (!lb) return;
+    lb.textContent = ui.unreadLogs;
+    lb.hidden = !ui.unreadLogs;
+  }
+
+  function showNotifBanner(logItem, count = 1) {
+    if (!ui.notifEnabled || !logItem) return;
+    playNotifChime();
+    const task = logItem.taskId ? S.tasks.find((x) => x.id === logItem.taskId) : null;
+
+    // 1. Browser Desktop Notification (jika diizinkan)
+    if ('Notification' in window && Notification.permission === 'granted') {
+      try {
+        const n = new Notification(
+          count > 1 ? `Project Board (${count} perubahan baru)` : 'Project Board — Update Baru',
+          { body: logItem.text, tag: 'pb-live-notif' },
+        );
+        n.onclick = () => {
+          window.focus();
+          if (task) openTaskDrawer(task);
+          n.close();
+        };
+      } catch (_) { /* abaikan */ }
+    }
+
+    // 2. In-App Floating Notification Card
+    const stack = document.getElementById('notif-stack');
+    if (!stack) return;
+    const card = h('div', {
+      class: 'notif-card' + (task ? ' is-clickable' : ''),
+      onclick: (e) => {
+        if (e.target.closest('.notif-close')) return;
+        if (task) openTaskDrawer(task);
+        card.remove();
+      },
+    },
+    h('div', { class: 'notif-head' },
+      h('span', {}, count > 1 ? `🔔 ${count} Perubahan Baru` : '🔔 Perubahan Baru'),
+      h('button', {
+        type: 'button',
+        class: 'notif-close',
+        title: 'Tutup notifikasi',
+        onclick: (e) => { e.stopPropagation(); card.remove(); },
+      }, '×')),
+    h('div', { class: 'notif-body' }, logItem.text),
+    task && h('div', { class: 'notif-action' }, `Buka Card #${task.id} →`));
+
+    stack.prepend(card);
+    while (stack.children.length > 3) stack.lastElementChild.remove();
+    setTimeout(() => { if (card.parentNode) card.remove(); }, 8000);
+  }
 
   /* ======================= LOGIN & MULTI-USER ======================= */
   function loginView() {
@@ -235,7 +334,9 @@
         btn.disabled = true;
         try {
           S = await api('POST', '/api/login', { username: uIn.value.trim(), password: pIn.value });
+          if (S.log && S.log[0]) ui.lastSeenLogTs = S.log[0].ts;
           ui.needLogin = false;
+          applyRouteCardIfNeeded();
           render();
           toast(`Masuk sebagai ${S.me.user}`);
         } catch (ex) {
@@ -349,16 +450,63 @@
     toast(`${p.name} dihapus`);
   });
 
-  /* ======================= SIDE-PEEK DETAIL SHEET ======================= */
-  function openTaskDrawer(t) {
+  /* ======================= SIDE-PEEK DETAIL SHEET & DEEP-LINK (/card/:id) ======================= */
+  function syncUrlWithDrawer(taskId, replace = false) {
+    try {
+      const wantPath = taskId ? `/card/${taskId}` : '/';
+      if (window.location.pathname === wantPath) return;
+      if (replace) window.history.replaceState({ cardId: taskId || null }, '', wantPath);
+      else window.history.pushState({ cardId: taskId || null }, '', wantPath);
+    } catch (_) { /* abaikan jika history API dibatasi */ }
+  }
+
+  function applyRouteCardIfNeeded() {
+    const cid = ui.pendingRouteTaskId || parseCardIdFromPath();
+    if (!cid || ui.needLogin || !Array.isArray(S.tasks)) return;
+    ui.pendingRouteTaskId = null;
+    const t = S.tasks.find((x) => x.id === cid);
+    if (t) {
+      ui.phaseId = t.phaseId;
+      store.set('phaseId', t.phaseId);
+      ui.drawerTaskId = t.id;
+      syncUrlWithDrawer(t.id, true);
+    } else {
+      ui.drawerTaskId = null;
+      syncUrlWithDrawer(null, true);
+      setTimeout(() => toast(`Card #${cid} tidak ditemukan`, true), 80);
+    }
+  }
+
+  async function copyCardLink(t) {
+    const url = `${window.location.origin}/card/${t.id}`;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = url;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+      }
+      toast(`Link card disalin: /card/${t.id}`);
+    } catch (_) {
+      toast(`URL: ${url}`);
+    }
+  }
+
+  function openTaskDrawer(t, pushUrl = true) {
     if (ui.drawerTaskId !== t.id) ui.addingBlocker = false;
     ui.drawerTaskId = t.id;
+    syncUrlWithDrawer(t.id, !pushUrl);
     renderDrawer();
   }
 
-  function closeTaskDrawer() {
+  function closeTaskDrawer(pushUrl = true) {
     ui.drawerTaskId = null;
     ui.addingBlocker = false;
+    if (pushUrl !== false) syncUrlWithDrawer(null);
     renderDrawer();
   }
 
@@ -377,6 +525,7 @@
     const t = S.tasks.find((x) => x.id === ui.drawerTaskId);
     if (!t) {
       ui.drawerTaskId = null;
+      syncUrlWithDrawer(null, true);
       drawer.hidden = true;
       backdrop.hidden = true;
       return;
@@ -393,14 +542,24 @@
       await mutate('PATCH', `/api/tasks/${t.id}`, patch);
     });
 
-    // Top bar dengan tombol Refresh
+    // Top bar dengan tombol Copy Link & Refresh
     const topBar = h('div', { class: 'drawer-top' },
       h('div', { class: 'drawer-top-left' },
         h('span', { style: { fontWeight: '600', color: 'var(--text-sec)' } }, ph ? ph.name : 'Phase'),
         h('span', {}, '/'),
-        h('span', {}, 'Detail Ticket'),
+        h('button', {
+          type: 'button',
+          class: 'card-id-pill',
+          title: 'Klik untuk salin link card (/card/' + t.id + ')',
+          onclick: () => copyCardLink(t),
+        }, `#${t.id}`),
         t.origin === 'change' && badge('CR', 'cr')),
       h('div', { class: 'drawer-top-actions' },
+        h('button', {
+          type: 'button', class: 'btn xs',
+          title: `Salin link langsung ke card ini (/card/${t.id})`,
+          onclick: () => copyCardLink(t),
+        }, '🔗 Copy Link'),
         h('button', {
           type: 'button', class: 'btn xs',
           title: 'Refresh data & komentar terbaru',
@@ -414,7 +573,7 @@
             closeTaskDrawer();
           }),
         }, 'Hapus'),
-        h('button', { type: 'button', class: 'btn xs', onclick: closeTaskDrawer }, 'Tutup ✕')));
+        h('button', { type: 'button', class: 'btn xs', onclick: () => closeTaskDrawer() }, 'Tutup ✕')));
 
     // Title input (auto-save)
     const titleIn = h('input', {
@@ -887,9 +1046,24 @@
   });
 
   function logDialog() {
+    ui.unreadLogs = 0;
+    updateLogBadge();
     const fmtTs = (ts) => new Date(ts).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' });
     infoDialog('Riwayat Perubahan', S.log.length
-      ? h('ul', { class: 'log' }, S.log.map((l) => h('li', {}, h('time', {}, fmtTs(l.ts)), l.text)))
+      ? h('ul', { class: 'log' }, S.log.map((l) => {
+          const targetTask = l.taskId ? S.tasks.find((x) => x.id === l.taskId) : null;
+          return h('li', {
+            class: targetTask ? 'is-link' : '',
+            title: targetTask ? `Klik untuk buka card #${targetTask.id}` : '',
+            onclick: targetTask ? () => {
+              const dlg = $('#dlg');
+              if (dlg && dlg.open) dlg.close();
+              openTaskDrawer(targetTask);
+            } : null,
+          },
+          h('time', {}, fmtTs(l.ts) + (targetTask ? ` · #${targetTask.id} ↗` : '')),
+          l.text);
+        }))
       : h('p', { class: 'empty' }, 'Belum ada riwayat.'));
   }
 
@@ -1599,6 +1773,8 @@
     const dy = drawerBody ? drawerBody.scrollTop : 0;
 
     updateUserButton();
+    updateNotifButton();
+    updateLogBadge();
     if (ui.needLogin) {
       $('#app').replaceChildren(loginView());
       renderDrawer();
@@ -1620,11 +1796,26 @@
 
   function init() {
     applyTheme();
+    updateNotifButton();
     $('#btn-theme').addEventListener('click', () => {
       ui.theme = ui.theme === 'dark' ? 'light' : 'dark';
       store.set('theme', ui.theme);
       applyTheme();
     });
+    const btnNotif = $('#btn-notif');
+    if (btnNotif) {
+      btnNotif.addEventListener('click', async () => {
+        if ('Notification' in window && Notification.permission === 'default') {
+          try { await Notification.requestPermission(); } catch (_) { /* abaikan */ }
+          ui.notifEnabled = true;
+        } else {
+          ui.notifEnabled = !ui.notifEnabled;
+        }
+        store.set('notifEnabled', ui.notifEnabled ? '1' : '0');
+        updateNotifButton();
+        toast(ui.notifEnabled ? 'Notifikasi perubahan diaktifkan' : 'Notifikasi perubahan dinonaktifkan');
+      });
+    }
     $('#btn-user').addEventListener('click', () => {
       if (ui.needLogin) return;
       userDialog();
@@ -1652,23 +1843,54 @@
     const dlg = $('#dlg');
     dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
     const backdrop = $('#drawer-backdrop');
-    if (backdrop) backdrop.addEventListener('click', closeTaskDrawer);
+    if (backdrop) backdrop.addEventListener('click', () => closeTaskDrawer());
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && ui.drawerTaskId && !dlg.open) closeTaskDrawer();
     });
     document.addEventListener('dragend', () => { dragging = false; dragId = null; clearDrop(); }, true);
 
+    window.addEventListener('popstate', () => {
+      const cid = parseCardIdFromPath();
+      if (cid) {
+        const t = S.tasks.find((x) => x.id === cid);
+        if (t) openTaskDrawer(t, false);
+      } else if (ui.drawerTaskId) {
+        closeTaskDrawer(false);
+      }
+    });
+
+    // Polling perubahan real-time setiap 5 detik (tetap jalan saat tab minimize / drawer terbuka)
     setInterval(async () => {
-      if (document.hidden || dragging || dlg.open || ui.drawerTaskId || ui.needLogin) return;
-      const a = document.activeElement;
-      if (a && a.closest && a.closest('#app') && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.value) return;
+      if (dragging || ui.needLogin) return;
       try {
         const r = await api('GET', '/api/rev');
-        if (r.rev !== S.rev) { S = await api('GET', '/api/state'); render(); }
-      } catch (_) { /* abaikan */ }
-    }, 15000);
+        if (r.rev !== S.rev) {
+          const nextState = await api('GET', '/api/state');
+          const newLogs = (nextState.log || []).filter((l) => !ui.lastSeenLogTs || l.ts > ui.lastSeenLogTs);
+          if (nextState.log && nextState.log[0]) ui.lastSeenLogTs = nextState.log[0].ts;
+          S = nextState;
 
-    api('GET', '/api/state').then((d) => { S = d; render(); }).catch((e) => {
+          if (newLogs.length > 0) {
+            ui.unreadLogs += newLogs.length;
+            updateLogBadge();
+            showNotifBanner(newLogs[0], newLogs.length);
+          }
+
+          const a = document.activeElement;
+          const isTyping = a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+          if (!dlg.open && !isTyping) {
+            render();
+          }
+        }
+      } catch (_) { /* abaikan */ }
+    }, 5000);
+
+    api('GET', '/api/state').then((d) => {
+      S = d;
+      if (S.log && S.log[0]) ui.lastSeenLogTs = S.log[0].ts;
+      applyRouteCardIfNeeded();
+      render();
+    }).catch((e) => {
       if (!ui.needLogin) {
         $('#app').replaceChildren(h('p', { class: 'empty' }, 'Gagal memuat data: ' + e.message));
       }

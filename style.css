@@ -858,7 +858,7 @@ dialog:has(.wide) { width: min(640px, calc(100vw - 24px)); }
 .drop-line { height: 2px; border-radius: 1px; background: var(--ink); }
 @media (hover: none) { .mv { display: flex; } .tcard { padding-right: 52px; } }
 
-/* ======================= TOAST ======================= */
+/* ======================= TOAST & LIVE NOTIFICATIONS ======================= */
 #toast {
   position: fixed; left: 50%; bottom: 20px; transform: translate(-50%, 16px); opacity: 0; pointer-events: none;
   background: var(--ink); color: var(--ink-fg); padding: 8px 14px; border-radius: 6px; font-size: 12.5px; font-weight: 500; z-index: 100;
@@ -866,6 +866,91 @@ dialog:has(.wide) { width: min(640px, calc(100vw - 24px)); }
 }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 #toast.err { background: var(--bad); color: #fff; }
+
+.notif-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 95;
+  display: grid;
+  gap: 8px;
+  width: min(360px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.notif-card {
+  pointer-events: auto;
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--active) 40%, var(--line));
+  border-left: 3.5px solid var(--active);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  display: grid;
+  gap: 5px;
+  animation: notifIn .2s ease-out;
+}
+.notif-card.is-clickable { cursor: pointer; transition: transform .12s, border-color .12s; }
+.notif-card.is-clickable:hover { transform: translateY(-1px); border-color: var(--active); }
+.notif-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--active);
+}
+.notif-close {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 14px;
+  line-height: 1;
+}
+.notif-close:hover { color: var(--text); }
+.notif-body {
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.4;
+  word-break: break-word;
+}
+.notif-action {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--active);
+}
+@keyframes notifIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.card-id-pill {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--panel-subtle);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
+}
+.card-id-pill:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+.log li.is-link {
+  cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.log li.is-link:hover {
+  border-color: var(--active);
+  background: var(--active-bg);
+}
+#btn-notif.is-on {
+  color: var(--active);
+}
 
 @media (max-width: 960px) {
   .split { grid-template-columns: 1fr; }
