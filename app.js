@@ -1543,7 +1543,12 @@
 
   function phaseCard(p) {
     const st = stats(p);
-    const items = tasksOf(p.id).sort((a, b) => a.order - b.order);
+    const items = tasksOf(p.id).sort((a, b) => {
+      const aDone = a.status === 'done' ? 1 : 0;
+      const bDone = b.status === 'done' ? 1 : 0;
+      if (aDone !== bDone) return aDone - bDone;
+      return (b.createdAt || '').localeCompare(a.createdAt || '') || (a.order - b.order);
+    });
     const base = items.filter((t) => t.origin !== 'change');
     const chg = items.filter((t) => t.origin === 'change');
     const blockersCount = items.reduce((sum, t) => sum + blockersOf(t).length, 0);

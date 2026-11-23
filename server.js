@@ -389,8 +389,8 @@ function taskFields(b, base = {}) {
 
 function newTask(phase, fields, status, extra = {}) {
   const st = TASK_STATUS.includes(status) ? status : 'todo';
-  const order = db.tasks.filter((x) => x.phaseId === phase.id && x.status === st).reduce((m, x) => Math.max(m, x.order + 1), 0);
-  const t = { id: uid(), phaseId: phase.id, ...fields, status: st, origin: 'baseline', crId: null, createdAt: now(), updatedAt: now(), order, ...extra };
+  db.tasks.filter((x) => x.phaseId === phase.id && x.status === st).forEach((x) => { x.order = (x.order || 0) + 1; });
+  const t = { id: uid(), phaseId: phase.id, ...fields, status: st, origin: 'baseline', crId: null, createdAt: now(), updatedAt: now(), order: 0, ...extra };
   db.tasks.push(t);
   return t;
 }
