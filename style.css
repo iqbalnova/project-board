@@ -811,6 +811,31 @@ dialog:has(.wide) { width: min(640px, calc(100vw - 24px)); }
 .tcard:hover { border-color: var(--line-strong); }
 .tcard.prio-high { border-left: 2.5px solid var(--bad); }
 .tcard.has-blocker { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); background: color-mix(in srgb, var(--bad-bg) 30%, var(--panel)); }
+.tcard.is-selected {
+  border-color: var(--active) !important;
+  background: color-mix(in srgb, var(--active-bg) 75%, var(--panel)) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--active) 28%, transparent), 0 8px 20px rgba(0, 0, 0, 0.12);
+  z-index: 4;
+  animation: cardPulse 1.4s ease-out;
+}
+.tcard-active-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--active);
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--active) 40%, var(--line));
+  padding: 1px 6px;
+  border-radius: 99px;
+  width: fit-content;
+}
+@keyframes cardPulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--active) 60%, transparent); transform: scale(1.02); }
+  50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--active) 18%, transparent); transform: scale(1.01); }
+  100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--active) 28%, transparent), 0 8px 20px rgba(0, 0, 0, 0.12); transform: scale(1); }
+}
 .tcard-blocker {
   font-size: 11px; color: var(--bad); background: var(--bad-bg);
   padding: 3px 6px; border-radius: 4px; font-weight: 500; line-height: 1.35;

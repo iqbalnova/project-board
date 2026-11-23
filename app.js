@@ -17,19 +17,28 @@
     set(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* abaikan */ } },
   };
 
-  function parseCardIdFromPath() {
-    const m = window.location.pathname.match(/^\/card\/([a-zA-Z0-9_-]+)\/?$/);
-    return m ? m[1] : null;
+  function parseRouteFromPath() {
+    const p = window.location.pathname;
+    const cm = p.match(/^\/(?:kanban\/)?card\/([a-zA-Z0-9_-]+)\/?$/);
+    if (cm) return { view: 'kanban', cardId: cm[1] };
+    if (/^\/kanban\/?$/.test(p)) return { view: 'kanban', cardId: null };
+    if (/^\/timeline\/?$/.test(p)) return { view: 'timeline', cardId: null };
+    return { view: null, cardId: null };
   }
 
+  function parseCardIdFromPath() {
+    return parseRouteFromPath().cardId;
+  }
+
+  const initRoute = parseRouteFromPath();
   let S = { rev: 0, phases: [], tasks: [], changes: [], log: [], me: { user: 'admin', authRequired: false, users: ['admin'] } };
   const ui = {
-    view: store.get('view') === 'kanban' ? 'kanban' : 'timeline',
+    view: initRoute.view || (store.get('view') === 'kanban' ? 'kanban' : 'timeline'),
     phaseId: store.get('phaseId'),
     q: '',
     refocus: null,
     drawerTaskId: null,
-    pendingRouteTaskId: parseCardIdFromPath(),
+    pendingRouteTaskId: initRoute.cardId,
     drawerRefocusComment: false,
     addingBlocker: false,
     needLogin: false,
@@ -425,8 +434,10 @@
   function openPhaseInKanban(id) {
     ui.phaseId = id;
     ui.view = 'kanban';
+    ui.drawerTaskId = null;
     store.set('phaseId', id);
     store.set('view', 'kanban');
+    syncUrlWithDrawer(null);
     render();
   }
 
@@ -450,26 +461,49 @@
     toast(`${p.name} dihapus`);
   });
 
-  /* ======================= SIDE-PEEK DETAIL SHEET & DEEP-LINK (/card/:id) ======================= */
+  /* ======================= SIDE-PEEK DETAIL SHEET & DEEP-LINK (/timeline, /kanban, /card/:id) ======================= */
   function syncUrlWithDrawer(taskId, replace = false) {
     try {
-      const wantPath = taskId ? `/card/${taskId}` : '/';
+      const wantPath = taskId
+        ? `/card/${taskId}`
+        : (ui.view === 'kanban' ? '/kanban' : '/timeline');
       if (window.location.pathname === wantPath) return;
-      if (replace) window.history.replaceState({ cardId: taskId || null }, '', wantPath);
-      else window.history.pushState({ cardId: taskId || null }, '', wantPath);
+      if (replace) window.history.replaceState({ view: ui.view, cardId: taskId || null }, '', wantPath);
+      else window.history.pushState({ view: ui.view, cardId: taskId || null }, '', wantPath);
     } catch (_) { /* abaikan jika history API dibatasi */ }
   }
 
+  function scrollSelectedCardIntoView(taskId) {
+    setTimeout(() => {
+      const el = document.getElementById('card-' + taskId);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+      }
+    }, 40);
+  }
+
   function applyRouteCardIfNeeded() {
-    const cid = ui.pendingRouteTaskId || parseCardIdFromPath();
-    if (!cid || ui.needLogin || !Array.isArray(S.tasks)) return;
+    const r = parseRouteFromPath();
+    if (r.view && !ui.drawerTaskId) {
+      ui.view = r.view;
+      store.set('view', r.view);
+    }
+    const cid = ui.pendingRouteTaskId || r.cardId;
+    if (!cid) {
+      if (!ui.needLogin) syncUrlWithDrawer(null, true);
+      return;
+    }
+    if (ui.needLogin || !Array.isArray(S.tasks)) return;
     ui.pendingRouteTaskId = null;
     const t = S.tasks.find((x) => x.id === cid);
     if (t) {
+      ui.view = 'kanban';
       ui.phaseId = t.phaseId;
+      store.set('view', 'kanban');
       store.set('phaseId', t.phaseId);
       ui.drawerTaskId = t.id;
       syncUrlWithDrawer(t.id, true);
+      scrollSelectedCardIntoView(t.id);
     } else {
       ui.drawerTaskId = null;
       syncUrlWithDrawer(null, true);
@@ -498,14 +532,41 @@
 
   function openTaskDrawer(t, pushUrl = true) {
     if (ui.drawerTaskId !== t.id) ui.addingBlocker = false;
+    const needSwitchToKanban = ui.view !== 'kanban' || ui.phaseId !== t.phaseId;
+    ui.view = 'kanban';
+    ui.phaseId = t.phaseId;
+    store.set('view', 'kanban');
+    store.set('phaseId', t.phaseId);
     ui.drawerTaskId = t.id;
     syncUrlWithDrawer(t.id, !pushUrl);
-    renderDrawer();
+    if (needSwitchToKanban) {
+      render();
+    } else {
+      document.querySelectorAll('.tcard.is-selected').forEach((el) => {
+        el.classList.remove('is-selected');
+        const tag = el.querySelector('.tcard-active-tag');
+        if (tag) tag.remove();
+      });
+      const cardEl = document.getElementById('card-' + t.id);
+      if (cardEl) {
+        cardEl.classList.add('is-selected');
+        if (!cardEl.querySelector('.tcard-active-tag')) {
+          cardEl.prepend(h('div', { class: 'tcard-active-tag' }, `● Sedang dibuka · #${t.id}`));
+        }
+      }
+      renderDrawer();
+    }
+    scrollSelectedCardIntoView(t.id);
   }
 
   function closeTaskDrawer(pushUrl = true) {
     ui.drawerTaskId = null;
     ui.addingBlocker = false;
+    document.querySelectorAll('.tcard.is-selected').forEach((el) => {
+      el.classList.remove('is-selected');
+      const tag = el.querySelector('.tcard-active-tag');
+      if (tag) tag.remove();
+    });
     if (pushUrl !== false) syncUrlWithDrawer(null);
     renderDrawer();
   }
@@ -1667,13 +1728,15 @@
     const commentsCount = (t.comments || []).length;
     const bCount = blockersOf(t).length;
     const pics = assigneesOf(t);
+    const isSelected = ui.drawerTaskId === t.id;
     const mv = (to, label) => h('button', {
       title: 'Pindah ke ' + STATUSES[to][1], 'aria-label': label,
       onclick: (e) => { e.stopPropagation(); moveTask(t.id, STATUSES[to][0]); },
     }, label);
 
     return h('div', {
-      class: 'tcard prio-' + t.priority + (bCount ? ' has-blocker' : ''),
+      id: 'card-' + t.id,
+      class: 'tcard prio-' + t.priority + (bCount ? ' has-blocker' : '') + (isSelected ? ' is-selected' : ''),
       draggable: 'true',
       dataset: { id: t.id, q: taskText(t) },
       onclick: () => openTaskDrawer(t),
@@ -1685,6 +1748,7 @@
       },
       ondragend: (e) => { e.currentTarget.classList.remove('dragging'); dragging = false; dragId = null; clearDrop(); },
     },
+    isSelected && h('div', { class: 'tcard-active-tag' }, `● Sedang dibuka · #${t.id}`),
     h('div', { class: 'tt' }, t.title),
     h('div', { class: 'tmeta' },
       bCount > 0 && badge(bCount > 1 ? `${bCount} Blocker` : 'Blocker', 'over'),
@@ -1755,7 +1819,7 @@
         }, ps.map((p) => h('option', { value: p.id, selected: p.id === ph.id }, p.name + (p.status === 'active' ? ' · Berjalan' : p.status === 'done' ? ' · Selesai' : '')))),
         h('span', { class: 'muted small' }, `${fmt(ph.start)} – ${fmt(ph.end)} (${days(ph)}h)`),
         ph.locked && badge('Locked', 'lock'),
-        h('button', { class: 'btn small ghost', onclick: () => { ui.view = 'timeline'; store.set('view', 'timeline'); render(); setTimeout(() => jumpToPhase(ph.id), 40); } }, '← Timeline'),
+        h('button', { class: 'btn small ghost', onclick: () => { ui.view = 'timeline'; ui.drawerTaskId = null; store.set('view', 'timeline'); syncUrlWithDrawer(null); render(); setTimeout(() => jumpToPhase(ph.id), 40); } }, '← Timeline'),
         h('input', {
           type: 'search', placeholder: 'Filter task / blocker…', value: ui.q, 'aria-label': 'Filter task',
           oninput: (e) => { ui.q = e.target.value; applyFilter(); },
@@ -1824,7 +1888,9 @@
       const b = e.target.closest('button[data-view]');
       if (!b) return;
       ui.view = b.dataset.view;
+      ui.drawerTaskId = null;
       store.set('view', ui.view);
+      syncUrlWithDrawer(null);
       render();
     });
     $('#btn-log').addEventListener('click', logDialog);
@@ -1850,12 +1916,17 @@
     document.addEventListener('dragend', () => { dragging = false; dragId = null; clearDrop(); }, true);
 
     window.addEventListener('popstate', () => {
-      const cid = parseCardIdFromPath();
-      if (cid) {
-        const t = S.tasks.find((x) => x.id === cid);
+      const r = parseRouteFromPath();
+      if (r.cardId) {
+        const t = S.tasks.find((x) => x.id === r.cardId);
         if (t) openTaskDrawer(t, false);
-      } else if (ui.drawerTaskId) {
-        closeTaskDrawer(false);
+      } else {
+        if (ui.drawerTaskId) ui.drawerTaskId = null;
+        if (r.view && r.view !== ui.view) {
+          ui.view = r.view;
+          store.set('view', ui.view);
+        }
+        render();
       }
     });
 

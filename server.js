@@ -750,8 +750,8 @@ const server = http.createServer(async (req, res) => {
 
     // Static assets selalu dapat diakses agar halaman Login in-app bisa dimuat
     if (req.method === 'GET' && assets[pathname]) return serveAsset(req, res, assets[pathname]);
-    // Deep-link path param untuk card (/card/:id) disajikan sebagai SPA index.html
-    if (req.method === 'GET' && /^\/card\/[a-zA-Z0-9_-]+\/?$/.test(pathname)) {
+    // Deep-link SPA routes (/timeline, /kanban, /card/:id, /kanban/card/:id) disajikan sebagai index.html
+    if (req.method === 'GET' && /^\/(timeline|kanban|card\/[a-zA-Z0-9_-]+|kanban\/card\/[a-zA-Z0-9_-]+)\/?$/.test(pathname)) {
       return serveAsset(req, res, assets['/']);
     }
 
