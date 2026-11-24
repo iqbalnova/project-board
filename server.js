@@ -883,14 +883,17 @@ route('DELETE', '/api/admin/users/:username', ({ params, user }) => {
   };
 });
 
-route('GET', '/api/export', () => ({
-  __send: true, status: 200,
-  headers: {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Content-Disposition': `attachment; filename="kanban-${activeTenantSlug}-${todayStr()}.json"`,
-  },
-  body: JSON.stringify(db, null, 1),
-}));
+route('GET', '/api/export', ({ user }) => {
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang memiliki izin untuk export database');
+  return {
+    __send: true, status: 200,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="kanban-${activeTenantSlug}-${todayStr()}.json"`,
+    },
+    body: JSON.stringify(db, null, 1),
+  };
+});
 
 route('POST', '/api/import', ({ body, user }) => {
   if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang memiliki izin untuk restore/import database');

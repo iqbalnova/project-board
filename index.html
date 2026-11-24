@@ -9,27 +9,31 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-        <rect width="16" height="16" rx="3.5" fill="currentColor"/>
-        <path d="M4 4.5h2v7H4zM7 4.5h2v4.5H7zM10 4.5h2v3h-2z" fill="var(--panel)"/>
-      </svg>
-      <span>Project Board</span>
+    <div class="topbar-left">
+      <div class="brand">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <rect width="16" height="16" rx="3.5" fill="currentColor"/>
+          <path d="M4 4.5h2v7H4zM7 4.5h2v4.5H7zM10 4.5h2v3h-2z" fill="var(--panel)"/>
+        </svg>
+        <span class="brand-text">Project Board</span>
+      </div>
+      <select id="tenant-select" class="tenant-select" aria-label="Pilih Project / Tenant" title="Pilih Project / Tenant Aktif" hidden></select>
     </div>
-    <select id="tenant-select" class="tenant-select" aria-label="Pilih Project / Tenant" title="Pilih Project / Tenant Aktif" hidden></select>
-    <nav class="tabs" id="tabs">
+    <nav class="tabs" id="tabs" hidden>
+      <button data-view="admin" id="tab-admin" hidden>🛡️ Kelola Tenant &amp; User</button>
       <button data-view="timeline">Timeline <span id="pending-badge" class="pill" hidden></span></button>
       <button data-view="kanban">Kanban</button>
     </nav>
     <div class="actions">
-      <button class="btn small" id="btn-tenants" title="Kelola Project/Tenant &amp; User (Super Admin)" hidden>⚙️ Kelola Tenant</button>
-      <button class="btn small" id="btn-user" title="Akun aktif / Ganti user">User</button>
-      <button class="btn ghost icon-only" id="btn-notif" title="Notifikasi perubahan" aria-label="Notifikasi perubahan"></button>
+      <div id="admin-board-tools" class="admin-board-tools" hidden>
+        <button class="btn ghost small" id="btn-log" title="Riwayat perubahan">Riwayat <span id="log-badge" class="pill" hidden></span></button>
+        <button class="btn ghost small" id="btn-export" title="Unduh backup JSON">Export</button>
+        <label class="btn ghost small" id="lbl-import" title="Pulihkan dari file backup">Import<input type="file" id="file-import" accept="application/json,.json" hidden></label>
+        <button class="btn ghost small danger-text" id="btn-reset" title="Reset database">Clear DB</button>
+      </div>
+      <button class="btn ghost icon-only" id="btn-notif" title="Notifikasi perubahan" aria-label="Notifikasi perubahan" hidden></button>
       <button class="btn ghost icon-only" id="btn-theme" title="Ganti tema" aria-label="Ganti tema"></button>
-      <button class="btn ghost small" id="btn-log" title="Riwayat perubahan">Riwayat <span id="log-badge" class="pill" hidden></span></button>
-      <button class="btn ghost small" id="btn-export" title="Unduh backup JSON">Export</button>
-      <label class="btn ghost small" title="Pulihkan dari file backup">Import<input type="file" id="file-import" accept="application/json,.json" hidden></label>
-      <button class="btn ghost small danger-text" id="btn-reset" title="Reset database">Clear DB</button>
+      <button class="btn small" id="btn-user" title="Akun aktif / Logout" hidden>User</button>
     </div>
   </header>
 
