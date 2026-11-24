@@ -317,48 +317,73 @@ let lastBackup = 0;
 /* ---------- PostgreSQL Connection (Sakala DB support) ---------- */
 let pgPool = null;
 let pgReady = false;
+let pgError = '';
+let pgConfigured = false;
 
-function buildPgConfig(forceSsl = false) {
-  if (!Pool) return null;
+function stripSslMode(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    u.searchParams.delete('sslmode');
+    u.searchParams.delete('ssl');
+    return u.toString();
+  } catch (_) {
+    return urlStr.replace(/([?&])sslmode=[^&]+(&|$)/i, '$1').replace(/[?&]$/, '');
+  }
+}
+
+function buildPgCandidates() {
+  if (!Pool) {
+    pgError = 'Modul pg tidak ditemukan';
+    return [];
+  }
   const connUrl = (process.env.DATABASE_URL || process.env.POSTGRES_URL || '').trim();
   const host = (process.env.DB_HOST || process.env.PGHOST || '').trim();
   const database = (process.env.DB_DATABASE || process.env.DB_NAME || process.env.PGDATABASE || '').trim();
   const user = (process.env.DB_USERNAME || process.env.DB_USER || process.env.PGUSER || '').trim();
   const password = process.env.DB_PASSWORD || process.env.PGPASSWORD || '';
   const port = parseInt(process.env.DB_PORT || process.env.PGPORT || '5432', 10) || 5432;
-  const wantSsl = forceSsl || /sslmode=require/i.test(connUrl) || process.env.DB_SSL === 'true';
+  const baseOpts = { max: 10, idleTimeoutMillis: 30000, connectionTimeoutMillis: 8000 };
 
-  if (connUrl) {
-    const cfg = { connectionString: connUrl, max: 10, idleTimeoutMillis: 30000, connectionTimeoutMillis: 8000 };
-    if (wantSsl) cfg.ssl = { rejectUnauthorized: false };
-    return cfg;
-  }
+  const candidates = [];
   if (host && database && user) {
-    const cfg = { host, port, database, user, password, max: 10, idleTimeoutMillis: 30000, connectionTimeoutMillis: 8000 };
-    if (wantSsl) cfg.ssl = { rejectUnauthorized: false };
-    return cfg;
+    candidates.push({ ...baseOpts, host, port, database, user, password, ssl: false });
+    candidates.push({ ...baseOpts, host, port, database, user, password, ssl: { rejectUnauthorized: false } });
   }
-  return null;
+  if (connUrl) {
+    const cleanUrl = stripSslMode(connUrl);
+    candidates.push({ ...baseOpts, connectionString: cleanUrl, ssl: false });
+    candidates.push({ ...baseOpts, connectionString: cleanUrl, ssl: { rejectUnauthorized: false } });
+  }
+  pgConfigured = candidates.length > 0;
+  return candidates;
 }
 
 async function initPostgres() {
-  let cfg = buildPgConfig(false);
-  if (!cfg) return;
-  try {
-    let pool = new Pool(cfg);
+  const candidates = buildPgCandidates();
+  if (!candidates.length) return;
+  let pool = null;
+  let lastErr = null;
+  for (const cfg of candidates) {
+    const testPool = new Pool(cfg);
+    testPool.on('error', (err) => console.error('[PostgreSQL Pool Error]', err.message));
     try {
-      await pool.query('SELECT 1');
-    } catch (firstErr) {
-      await pool.end().catch(() => {});
-      if (!cfg.ssl) {
-        cfg = buildPgConfig(true);
-        pool = new Pool(cfg);
-        await pool.query('SELECT 1');
-      } else {
-        throw firstErr;
-      }
+      await testPool.query('SELECT 1');
+      pool = testPool;
+      break;
+    } catch (e) {
+      lastErr = e;
+      await testPool.end().catch(() => {});
     }
+  }
+  if (!pool) {
+    pgError = lastErr ? lastErr.message : 'Koneksi PostgreSQL gagal';
+    console.error(`[!] Gagal terhubung ke PostgreSQL (${pgError}). Menggunakan penyimpanan file lokal sebagai fallback.`);
+    pgReady = false;
+    return;
+  }
+  try {
     pgPool = pool;
+    pgError = '';
     await pgPool.query(`
       CREATE TABLE IF NOT EXISTS pb_meta (
         key TEXT PRIMARY KEY,
@@ -393,14 +418,15 @@ async function initPostgres() {
       db = store.tenants[activeTenantSlug].board;
       pgReady = true;
       saveLocalStoreSync();
-      console.log(`[PostgreSQL] Terhubung & memuat ${Object.keys(store.tenants).length} tenant serta ${Object.keys(store.users).length} user.`);
+      console.log(`[PostgreSQL] Terhubung & memuat ${Object.keys(store.tenants).length} project serta ${Object.keys(store.users).length} user.`);
     } else {
       pgReady = true;
       await syncAllToPostgres();
-      console.log(`[PostgreSQL] Tabel baru diinisialisasi & data awal (${Object.keys(store.tenants).length} tenant) disimpan ke PostgreSQL.`);
+      console.log(`[PostgreSQL] Tabel baru diinisialisasi & data awal (${Object.keys(store.tenants).length} project) disimpan ke PostgreSQL.`);
     }
   } catch (err) {
-    console.error(`[!] Gagal terhubung ke PostgreSQL (${err.message}). Menggunakan penyimpanan file lokal sebagai fallback.`);
+    pgError = err.message;
+    console.error(`[!] Gagal menginisialisasi tabel PostgreSQL (${err.message}). Menggunakan penyimpanan file lokal sebagai fallback.`);
     pgReady = false;
   }
 }
@@ -467,19 +493,19 @@ function saveLocalStoreSync() {
   }
 }
 
-function save(tenantSlug = activeTenantSlug) {
+async function save(tenantSlug = activeTenantSlug) {
   const t = store.tenants[tenantSlug];
   if (t) {
     t.board.rev++;
   }
   saveLocalStoreSync();
-  syncTenantToPostgres(tenantSlug);
+  await syncTenantToPostgres(tenantSlug);
 }
 
-function saveMetaAndTenant(tenantSlug = null) {
+async function saveMetaAndTenant(tenantSlug = null) {
   saveLocalStoreSync();
-  syncUsersToPostgres();
-  if (tenantSlug) syncTenantToPostgres(tenantSlug);
+  await syncUsersToPostgres();
+  if (tenantSlug) await syncTenantToPostgres(tenantSlug);
 }
 
 function addLog(text, user, taskId = null) {
@@ -746,7 +772,7 @@ const stateWithMeta = (user, tenantSlug = activeTenantSlug) => {
     },
   };
 };
-const saved = (user) => { save(activeTenantSlug); return stateWithMeta(user, activeTenantSlug); };
+const saved = async (user) => { await save(activeTenantSlug); return stateWithMeta(user, activeTenantSlug); };
 
 function generateUniqueSlug(name, ignoreSlug = null) {
   let base = slugify(name);
@@ -764,6 +790,8 @@ function buildAdminOverview() {
   const allSlugs = Object.keys(store.tenants);
   return {
     storage: pgReady ? 'postgresql' : 'local-file',
+    pgConfigured,
+    pgError,
     superAdminEnvUser: SUPER_ADMIN_USER,
     tenants: Object.values(store.tenants).map((t) => ({
       slug: t.slug,
@@ -794,7 +822,7 @@ route('GET', '/api/state', ({ user }) => stateWithMeta(user, activeTenantSlug));
 route('GET', '/api/rev', () => ({ rev: db.rev, latestLog: db.log[0] || null, tenant: activeTenantSlug }));
 
 /* ---------- Auth: Self-Service Ganti Password ---------- */
-route('POST', '/api/auth/password', ({ body, user }) => {
+route('POST', '/api/auth/password', async ({ body, user }) => {
   if (!user) throw new HttpError(401, 'Silakan login terlebih dahulu');
   if (user === SUPER_ADMIN_USER) {
     throw forbidden('Password Super Admin utama tidak dapat diubah dari sini');
@@ -811,7 +839,7 @@ route('POST', '/api/auth/password', ({ body, user }) => {
   }
   u.password = newPassword;
   store.authEnabled = true;
-  saveMetaAndTenant(null);
+  await saveMetaAndTenant(null);
   return { ok: true };
 });
 
@@ -821,7 +849,7 @@ route('GET', '/api/admin/overview', ({ user }) => {
   return buildAdminOverview();
 });
 
-route('POST', '/api/admin/tenants', ({ body, user }) => {
+route('POST', '/api/admin/tenants', async ({ body, user }) => {
   if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat membuat Project baru');
   const name = str(body.name, 80);
   if (!name) throw bad('Nama project wajib diisi');
@@ -848,14 +876,14 @@ route('POST', '/api/admin/tenants', ({ body, user }) => {
     }
   }
 
-  saveMetaAndTenant(slug);
+  await saveMetaAndTenant(slug);
   return {
     overview: buildAdminOverview(),
     state: stateWithMeta(user, slug),
   };
 });
 
-route('PATCH', '/api/admin/tenants/:slug', ({ params, body, user }) => {
+route('PATCH', '/api/admin/tenants/:slug', async ({ params, body, user }) => {
   if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat mengubah Project');
   const oldSlug = params.slug;
   const t = store.tenants[oldSlug];
@@ -883,7 +911,7 @@ route('PATCH', '/api/admin/tenants/:slug', ({ params, body, user }) => {
     if (activeTenantSlug === oldSlug) {
       activeTenantSlug = newSlug;
     }
-    deleteTenantFromPostgres(oldSlug);
+    await deleteTenantFromPostgres(oldSlug);
   }
 
   if (body.desc !== undefined) {
@@ -905,14 +933,14 @@ route('PATCH', '/api/admin/tenants/:slug', ({ params, body, user }) => {
     }
   }
   t.board.rev = (t.board.rev || 1) + 1;
-  saveMetaAndTenant(t.slug);
+  await saveMetaAndTenant(t.slug);
   return {
     overview: buildAdminOverview(),
     state: stateWithMeta(user, t.slug),
   };
 });
 
-route('DELETE', '/api/admin/tenants/:slug', ({ params, user }) => {
+route('DELETE', '/api/admin/tenants/:slug', async ({ params, user }) => {
   if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat menghapus Project');
   const slug = params.slug;
   if (!store.tenants[slug]) throw notFound('Project tidak ditemukan');
@@ -924,8 +952,8 @@ route('DELETE', '/api/admin/tenants/:slug', ({ params, user }) => {
     }
   }
   saveLocalStoreSync();
-  syncUsersToPostgres();
-  deleteTenantFromPostgres(slug);
+  await syncUsersToPostgres();
+  await deleteTenantFromPostgres(slug);
   const nextSlug = Object.keys(store.tenants)[0];
   return {
     overview: buildAdminOverview(),
@@ -933,7 +961,7 @@ route('DELETE', '/api/admin/tenants/:slug', ({ params, user }) => {
   };
 });
 
-route('POST', '/api/admin/users', ({ body, user }) => {
+route('POST', '/api/admin/users', async ({ body, user }) => {
   if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat mengelola User');
   const username = str(body.username, 60).toLowerCase().replace(/[^a-z0-9._-]/g, '');
   if (!username) throw bad('Username wajib diisi (huruf/angka)');
@@ -957,21 +985,21 @@ route('POST', '/api/admin/users', ({ body, user }) => {
     tenants,
   };
   store.authEnabled = Object.values(store.users).some((u) => Boolean(u.password));
-  saveMetaAndTenant(null);
+  await saveMetaAndTenant(null);
   return {
     overview: buildAdminOverview(),
     state: stateWithMeta(user, activeTenantSlug),
   };
 });
 
-route('DELETE', '/api/admin/users/:username', ({ params, user }) => {
+route('DELETE', '/api/admin/users/:username', async ({ params, user }) => {
   if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat menghapus User');
   const target = params.username;
   if (target === SUPER_ADMIN_USER) throw forbidden('Akun Super Admin utama tidak dapat dihapus');
   if (target === user) throw bad('Tidak dapat menghapus akun yang sedang digunakan');
   if (!store.users[target]) throw notFound('User tidak ditemukan');
   delete store.users[target];
-  saveMetaAndTenant(null);
+  await saveMetaAndTenant(null);
   return {
     overview: buildAdminOverview(),
     state: stateWithMeta(user, activeTenantSlug),
@@ -1381,6 +1409,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname.startsWith('/api/')) {
+      if (pgConfigured && !pgReady) {
+        await initPostgres();
+      }
       for (const r of routes) {
         if (r.method !== req.method) continue;
         const m = pathname.match(r.re);
@@ -1392,7 +1423,7 @@ const server = http.createServer(async (req, res) => {
           body = await readBody(req);
           if (!body || typeof body !== 'object' || Array.isArray(body)) throw bad('Body harus berupa objek JSON');
         }
-        const out = r.fn({ params: m.groups || {}, body, req, user });
+        const out = await r.fn({ params: m.groups || {}, body, req, user });
         if (out && out.__send) return send(res, out.status, out.body, out.headers);
         return sendJson(res, 200, out);
       }

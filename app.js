@@ -1577,21 +1577,26 @@
           onclick: () => { ui.userPage++; render(); },
         }, '→')));
 
-    return h('div', { class: 'admin-grid' },
-      h('section', { class: 'panel admin-panel' },
-        h('div', { class: 'admin-panel-head' },
-          h('h3', {}, `Project (${overview.tenants.length})`),
-          h('button', { type: 'button', class: 'btn primary small', onclick: () => projectCrudDialog(null) }, '+ Project')),
-        h('div', { class: 'admin-toolbar' }, projSearchIn),
-        projectRows,
-        projPager),
-      h('section', { class: 'panel admin-panel' },
-        h('div', { class: 'admin-panel-head' },
-          h('h3', {}, `User (${overview.users.length})`),
-          h('button', { type: 'button', class: 'btn primary small', onclick: () => userCrudDialog(null) }, '+ User')),
-        h('div', { class: 'admin-toolbar' }, userSearchIn),
-        userRows,
-        userPager));
+    return h('div', { class: 'wrap' },
+      overview.storage !== 'postgresql' && h('div', { class: 'form-err' },
+        overview.pgConfigured
+          ? `PostgreSQL gagal terhubung (${overview.pgError || 'cek konfigurasi DB'}). Saat ini berjalan di Local File sementara (data akan hilang saat container di-redeploy).`
+          : 'Database PostgreSQL belum terdeteksi di environment. Saat ini berjalan di Local File sementara (data akan hilang saat container di-redeploy).'),
+      h('div', { class: 'admin-grid' },
+        h('section', { class: 'panel admin-panel' },
+          h('div', { class: 'admin-panel-head' },
+            h('h3', {}, `Project (${overview.tenants.length})`),
+            h('button', { type: 'button', class: 'btn primary small', onclick: () => projectCrudDialog(null) }, '+ Project')),
+          h('div', { class: 'admin-toolbar' }, projSearchIn),
+          projectRows,
+          projPager),
+        h('section', { class: 'panel admin-panel' },
+          h('div', { class: 'admin-panel-head' },
+            h('h3', {}, `User (${overview.users.length})`),
+            h('button', { type: 'button', class: 'btn primary small', onclick: () => userCrudDialog(null) }, '+ User')),
+          h('div', { class: 'admin-toolbar' }, userSearchIn),
+          userRows,
+          userPager)));
   }
 
   function projectInfoBar() {
