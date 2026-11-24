@@ -35,37 +35,34 @@ const DAY = 86400000;
 let Pool = null;
 try { ({ Pool } = require('pg')); } catch (_) { /* fallback file lokal jika pg belum terpasang */ }
 
-/* ---------- multi-user dari environment variable ---------- */
-// Format APP_USERS: "iqbal:pass123,budi:pass456,sari:pass789" (mendukung pemisah koma, titik koma, atau baris baru)
-// Tetap kompatibel dengan APP_USER & APP_PASSWORD tunggal.
+/* ---------- Super Admin & initial seed dari environment variable ---------- */
+const SUPER_ADMIN_USER = (process.env.SUPER_ADMIN_USER || process.env.ADMIN_USER || process.env.APP_USER || 'admin').trim().toLowerCase() || 'admin';
+const SUPER_ADMIN_PASSWORD = (process.env.SUPER_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || process.env.APP_PASSWORD || 'admin123').trim();
+
 function loadUsersFromEnv() {
   const map = new Map();
+  map.set(SUPER_ADMIN_USER, SUPER_ADMIN_PASSWORD);
   const rawList = process.env.APP_USERS || '';
   for (const part of rawList.split(/[,;\r\n]+/)) {
     const item = part.trim();
     if (!item) continue;
     const idx = item.indexOf(':');
     if (idx <= 0) continue;
-    const u = item.slice(0, idx).trim();
+    const u = item.slice(0, idx).trim().toLowerCase();
     const p = item.slice(idx + 1).trim();
     if (u && p) map.set(u, p);
-  }
-  const singleUser = (process.env.APP_USER || 'admin').trim();
-  const singlePass = (process.env.APP_PASSWORD || '').trim();
-  if (singlePass && !map.has(singleUser)) {
-    map.set(singleUser, singlePass);
   }
   return map;
 }
 
 const USERS = loadUsersFromEnv();
-const AUTH_REQUIRED = USERS.size > 0;
+const AUTH_REQUIRED = true;
 const SECRET_SEED = [
   process.env.TOKEN_SECRET || '',
   process.env.DATABASE_URL || '',
   process.env.DB_HOST || '',
   process.env.DB_PASSWORD || '',
-  AUTH_REQUIRED ? Array.from(USERS.entries()).map(([u, p]) => `${u}:${p}`).join('|') : 'open-mode-secret',
+  `${SUPER_ADMIN_USER}:${SUPER_ADMIN_PASSWORD}`,
 ].join('::');
 const TOKEN_SECRET = crypto.createHash('sha256').update(SECRET_SEED).digest();
 
@@ -218,35 +215,24 @@ function buildInitialStore() {
     },
   };
   const users = {};
-  for (const [u, p] of USERS.entries()) {
+  const initialSeeds = new Map([
+    [SUPER_ADMIN_USER, SUPER_ADMIN_PASSWORD],
+    ['meisy', 'meisy123'],
+    ['aceng', 'aceng123'],
+    ['zudev', 'zudev123'],
+    ['ocam', 'ocam123'],
+    ...USERS.entries(),
+  ]);
+  for (const [u, p] of initialSeeds.entries()) {
+    const isSuper = u === SUPER_ADMIN_USER || u === 'admin';
     users[u] = {
       username: u,
       password: p,
-      role: u === 'admin' ? 'superadmin' : 'user',
+      role: isSuper ? 'superadmin' : 'user',
       tenants: ['main'],
     };
   }
-  if (!users.admin) {
-    users.admin = {
-      username: 'admin',
-      password: USERS.get('admin') || process.env.APP_PASSWORD || '',
-      role: 'superadmin',
-      tenants: ['main'],
-    };
-  }
-  if (!USERS.size && fs.existsSync(path.join(__dirname, '.env.example'))) {
-    const ex = fs.readFileSync(path.join(__dirname, '.env.example'), 'utf8');
-    const m = ex.match(/APP_USERS=([^\r\n]+)/);
-    if (m) {
-      for (const part of m[1].split(/[,;]+/)) {
-        const u = part.split(':')[0].trim();
-        if (u && !users[u]) {
-          users[u] = { username: u, password: '', role: u === 'admin' ? 'superadmin' : 'user', tenants: ['main'] };
-        }
-      }
-    }
-  }
-  return { authEnabled: AUTH_REQUIRED, users, tenants };
+  return { authEnabled: true, users, tenants };
 }
 
 function normalizeStore(raw) {
@@ -270,45 +256,45 @@ function normalizeStore(raw) {
   if (!Object.keys(tenants).length) Object.assign(tenants, base.tenants);
   const allSlugs = Object.keys(tenants);
 
-  const users = { ...base.users };
-  if (raw.users && typeof raw.users === 'object') {
+  const users = {};
+  if (raw.users && typeof raw.users === 'object' && Object.keys(raw.users).length > 0) {
     for (const [k, u] of Object.entries(raw.users)) {
-      const uname = str(u && (u.username || k), 60);
+      const uname = str(u && (u.username || k), 60).toLowerCase();
       if (!uname) continue;
-      const envPass = USERS.get(uname);
-      const pass = typeof (u && u.password) === 'string' && u.password ? u.password : (envPass || '');
-      const role = (uname === 'admin' || (u && u.role === 'superadmin')) ? 'superadmin' : 'user';
+      const isSuper = uname === SUPER_ADMIN_USER || uname === 'admin' || (u && u.role === 'superadmin');
+      const pass = typeof (u && u.password) === 'string' && u.password
+        ? u.password
+        : (isSuper ? SUPER_ADMIN_PASSWORD : '');
       const userTenants = Array.isArray(u && u.tenants)
         ? u.tenants.filter((s) => tenants[s])
         : [allSlugs[0]];
       users[uname] = {
         username: uname,
         password: pass,
-        role,
-        tenants: role === 'superadmin' ? allSlugs : userTenants,
+        role: isSuper ? 'superadmin' : 'user',
+        tenants: isSuper ? allSlugs : userTenants,
       };
     }
-  }
-  // Pastikan user dari env APP_USERS selalu terdaftar
-  for (const [u, p] of USERS.entries()) {
-    if (!users[u]) {
-      users[u] = {
-        username: u,
-        password: p,
-        role: u === 'admin' ? 'superadmin' : 'user',
-        tenants: allSlugs,
-      };
-    } else if (!users[u].password && p) {
-      users[u].password = p;
-    }
-  }
-  if (!users.admin) {
-    users.admin = { username: 'admin', password: USERS.get('admin') || '', role: 'superadmin', tenants: allSlugs };
   } else {
-    users.admin.role = 'superadmin';
+    Object.assign(users, base.users);
   }
-  const hasAnyPassword = AUTH_REQUIRED || Object.values(users).some((u) => Boolean(u.password));
-  return { authEnabled: hasAnyPassword, users, tenants };
+
+  // Pastikan akun Super Admin utama dari env selalu aktif
+  if (!users[SUPER_ADMIN_USER]) {
+    users[SUPER_ADMIN_USER] = {
+      username: SUPER_ADMIN_USER,
+      password: SUPER_ADMIN_PASSWORD,
+      role: 'superadmin',
+      tenants: allSlugs,
+    };
+  } else {
+    users[SUPER_ADMIN_USER].role = 'superadmin';
+    users[SUPER_ADMIN_USER].tenants = allSlugs;
+    if (process.env.SUPER_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD) {
+      users[SUPER_ADMIN_USER].password = SUPER_ADMIN_PASSWORD;
+    }
+  }
+  return { authEnabled: true, users, tenants };
 }
 
 function loadLocalStore() {
