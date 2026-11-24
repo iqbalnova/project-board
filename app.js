@@ -264,8 +264,9 @@
   };
 
   function envUsers() {
-    const list = (S.me && Array.isArray(S.me.users) && S.me.users.length) ? S.me.users : ['admin'];
-    return list.includes('admin') ? list : ['admin', ...list];
+    const list = (S.me && Array.isArray(S.me.users) && S.me.users.length) ? S.me.users : [];
+    if (list.length) return list;
+    return [(S.me && S.me.user) || 'admin'];
   }
 
   function picOptions(currentVal = '') {
@@ -459,14 +460,61 @@
     const dlg = $('#dlg');
     const me = (S.me && S.me.user) || 'admin';
     const isSuper = Boolean((S.me && S.me.isSuperAdmin) || me === 'admin');
+    const isEnvSuper = Boolean(S.me && S.me.isEnvSuperAdmin);
     const assignedTenants = Array.isArray(S.tenants) ? S.tenants.map((t) => t.name).join(', ') : '-';
+
+    let pwdSection;
+    if (isEnvSuper) {
+      pwdSection = h('div', { class: 'pwd-box' },
+        h('div', { class: 'small muted' }, 'Password Super Admin utama diatur melalui environment variable (.env).'));
+    } else {
+      const oldIn = h('input', { type: 'password', required: true, placeholder: 'Password saat ini', autocomplete: 'current-password' });
+      const newIn = h('input', { type: 'password', required: true, placeholder: 'Minimal 3 karakter', minlength: 3, autocomplete: 'new-password' });
+      const confirmIn = h('input', { type: 'password', required: true, placeholder: 'Ulangi password baru', minlength: 3, autocomplete: 'new-password' });
+      const err = h('div', { class: 'form-err', hidden: true });
+      const saveBtn = h('button', { type: 'submit', class: 'btn primary small' }, 'Simpan Password');
+
+      pwdSection = h('form', {
+        class: 'pwd-box',
+        onsubmit: async (e) => {
+          e.preventDefault();
+          err.hidden = true;
+          if (newIn.value.trim() !== confirmIn.value.trim()) {
+            err.textContent = 'Konfirmasi password baru tidak sama';
+            err.hidden = false;
+            return;
+          }
+          saveBtn.disabled = true;
+          try {
+            await api('POST', '/api/auth/password', {
+              currentPassword: oldIn.value,
+              newPassword: newIn.value.trim(),
+            });
+            dlg.close();
+            toast('Password berhasil diperbarui');
+          } catch (ex) {
+            err.textContent = ex.message;
+            err.hidden = false;
+          } finally {
+            saveBtn.disabled = false;
+          }
+        },
+      },
+      h('h3', {}, 'Ganti Password'),
+      h('label', { class: 'field' }, h('span', {}, 'Password Lama'), oldIn),
+      h('label', { class: 'field' }, h('span', {}, 'Password Baru'), newIn),
+      h('label', { class: 'field' }, h('span', {}, 'Konfirmasi Password Baru'), confirmIn),
+      err,
+      h('div', { style: { display: 'flex', justifyContent: 'flex-end' } }, saveBtn));
+    }
 
     dlg.replaceChildren(
       h('div', { class: 'dlg-in' },
         h('h2', {}, me),
         h('p', { class: 'intro' }, `Role: ${isSuper ? 'Admin' : 'User'} · Project: ${assignedTenants}`),
+        pwdSection,
         h('div', { class: 'actions-row' },
-          h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Batal'),
+          h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Tutup'),
           h('button', {
             type: 'button', class: 'btn danger',
             onclick: safe(async () => {
@@ -1089,6 +1137,88 @@
     if (msg) toast(msg);
   }
 
+  function multiSelectDropdown({ placeholder = 'Pilih…', searchPlaceholder = 'Cari…', items = [], selectedSet = new Set(), emptyText = 'Tidak ada data.' }) {
+    let isOpen = false;
+    let q = '';
+
+    const triggerText = h('span', { class: 'ms-trigger-text' });
+    const caret = h('span', { class: 'ms-caret' }, '▾');
+    const triggerBtn = h('button', {
+      type: 'button',
+      class: 'ms-trigger',
+      onclick: () => {
+        isOpen = !isOpen;
+        menu.hidden = !isOpen;
+        caret.textContent = isOpen ? '▴' : '▾';
+        if (isOpen) setTimeout(() => searchIn.focus(), 0);
+      },
+    }, triggerText, caret);
+
+    const searchIn = h('input', {
+      type: 'search',
+      placeholder: searchPlaceholder,
+      oninput: (e) => {
+        q = e.target.value.trim().toLowerCase();
+        renderList();
+      },
+    });
+
+    const clearBtn = h('button', {
+      type: 'button',
+      class: 'btn xs ghost',
+      onclick: () => {
+        selectedSet.clear();
+        updateTrigger();
+        renderList();
+      },
+    }, 'Kosongkan');
+
+    const listWrap = h('div', { class: 'ms-list' });
+    const menu = h('div', { class: 'ms-menu', hidden: true },
+      h('div', { class: 'ms-head' }, searchIn, clearBtn),
+      listWrap);
+
+    function updateTrigger() {
+      const chosen = items.filter((it) => selectedSet.has(it.value)).map((it) => it.label);
+      if (!chosen.length) {
+        triggerText.textContent = placeholder;
+        triggerBtn.classList.add('is-placeholder');
+        clearBtn.hidden = true;
+      } else {
+        triggerText.textContent = `${chosen.length} dipilih: ${chosen.join(', ')}`;
+        triggerBtn.classList.remove('is-placeholder');
+        clearBtn.hidden = false;
+      }
+    }
+
+    function renderList() {
+      const filtered = items.filter((it) => !q || it.label.toLowerCase().includes(q) || it.value.toLowerCase().includes(q));
+      if (!filtered.length) {
+        listWrap.replaceChildren(h('div', { class: 'ms-empty' }, emptyText));
+        return;
+      }
+      listWrap.replaceChildren(
+        ...filtered.map((it) => {
+          const checked = selectedSet.has(it.value);
+          const cb = h('input', {
+            type: 'checkbox',
+            checked,
+            onchange: (e) => {
+              if (e.target.checked) selectedSet.add(it.value);
+              else selectedSet.delete(it.value);
+              updateTrigger();
+            },
+          });
+          return h('label', { class: 'ms-item' }, cb, h('span', {}, it.label));
+        }),
+      );
+    }
+
+    updateTrigger();
+    renderList();
+    return h('div', { class: 'ms-dropdown' }, triggerBtn, menu);
+  }
+
   function projectCrudDialog(proj = null) {
     const dlg = $('#dlg');
     const overview = ui.adminOverview || { tenants: S.tenants || [], users: [] };
@@ -1143,41 +1273,19 @@
         },
       }, '+ Link'));
 
-    // Members state with search filter inside modal
+    // Default kosong saat tambah project baru; saat edit mengikuti anggota project saat ini
     const selectedMembers = new Set(
       isEdit
-        ? (proj.members || [])
-        : regularUsers.map((u) => u.username),
+        ? (proj.members || []).filter((m) => regularUsers.some((u) => u.username === m))
+        : [],
     );
-    let memberFilter = '';
-    const memberSearchIn = h('input', {
-      type: 'search',
-      placeholder: 'Cari anggota…',
-      oninput: (e) => { memberFilter = e.target.value.trim().toLowerCase(); renderMemberCheckboxes(); },
+    const memberDropdown = multiSelectDropdown({
+      placeholder: 'Pilih user untuk project ini…',
+      searchPlaceholder: 'Cari user…',
+      items: regularUsers.map((u) => ({ value: u.username, label: u.username })),
+      selectedSet: selectedMembers,
+      emptyText: 'Tidak ada user ditemukan.',
     });
-    const memberListWrap = h('div', { class: 'assign-list' });
-    const renderMemberCheckboxes = () => {
-      const filtered = regularUsers.filter((u) => !memberFilter || u.username.toLowerCase().includes(memberFilter));
-      if (!filtered.length) {
-        memberListWrap.replaceChildren(h('div', { class: 'small muted', style: { padding: '4px' } }, 'Tidak ada user.'));
-        return;
-      }
-      memberListWrap.replaceChildren(
-        ...filtered.map((u) => {
-          const checked = selectedMembers.has(u.username);
-          const cb = h('input', {
-            type: 'checkbox',
-            checked,
-            onchange: (e) => {
-              if (e.target.checked) selectedMembers.add(u.username);
-              else selectedMembers.delete(u.username);
-            },
-          });
-          return h('label', { class: 'assign-item' }, cb, h('span', {}, u.username));
-        }),
-      );
-    };
-    renderMemberCheckboxes();
 
     const err = h('div', { class: 'form-err', hidden: true });
     const submitBtn = h('button', { type: 'submit', class: 'btn primary' }, isEdit ? 'Simpan' : 'Buat Project');
@@ -1220,11 +1328,9 @@
       h('span', {}, 'Link Dokumentasi'),
       linksWrap,
       addLinkRow),
-    regularUsers.length > 0 && h('div', { class: 'field' },
-      h('span', {}, `Anggota Project (${regularUsers.length} user)`),
-      h('div', { class: 'assign-box' },
-        regularUsers.length > 5 && memberSearchIn,
-        memberListWrap)),
+    h('div', { class: 'field' },
+      h('span', {}, 'Anggota Project'),
+      memberDropdown),
     err,
     h('div', { class: 'actions-row' },
       h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Batal'),
@@ -1261,51 +1367,23 @@
       h('option', { value: 'superadmin', selected: isEdit && userObj.role === 'superadmin' }, 'Admin'));
 
     const selectedProjects = new Set(
-      isEdit ? (userObj.tenants || []) : (overview.tenants || []).map((t) => t.slug),
+      isEdit ? (userObj.tenants || []) : [],
     );
-    let projFilter = '';
-    const projSearchIn = h('input', {
-      type: 'search',
-      placeholder: 'Cari project…',
-      oninput: (e) => { projFilter = e.target.value.trim().toLowerCase(); renderProjCheckboxes(); },
+    const projDropdown = multiSelectDropdown({
+      placeholder: 'Pilih project…',
+      searchPlaceholder: 'Cari project…',
+      items: (overview.tenants || []).map((t) => ({ value: t.slug, label: t.name })),
+      selectedSet: selectedProjects,
+      emptyText: 'Tidak ada project ditemukan.',
     });
-    const projListWrap = h('div', { class: 'assign-list' });
-    const assignFieldWrap = h('div', { class: 'field' });
-
-    const renderProjCheckboxes = () => {
-      const allTenants = overview.tenants || [];
-      const filtered = allTenants.filter((t) => !projFilter || t.name.toLowerCase().includes(projFilter) || t.slug.includes(projFilter));
-      if (!filtered.length) {
-        projListWrap.replaceChildren(h('div', { class: 'small muted', style: { padding: '4px' } }, 'Tidak ada project.'));
-        return;
-      }
-      projListWrap.replaceChildren(
-        ...filtered.map((t) => {
-          const checked = selectedProjects.has(t.slug);
-          const cb = h('input', {
-            type: 'checkbox',
-            checked,
-            onchange: (e) => {
-              if (e.target.checked) selectedProjects.add(t.slug);
-              else selectedProjects.delete(t.slug);
-            },
-          });
-          return h('label', { class: 'assign-item' }, cb, h('span', {}, t.name));
-        }),
-      );
-    };
-    renderProjCheckboxes();
+    const assignFieldWrap = h('div', { class: 'field' },
+      h('span', {}, 'Akses Project'),
+      projDropdown);
 
     const syncRoleVisibility = () => {
       assignFieldWrap.hidden = uRoleIn.value === 'superadmin';
     };
     uRoleIn.addEventListener('change', syncRoleVisibility);
-    assignFieldWrap.append(
-      h('span', {}, 'Akses Project'),
-      h('div', { class: 'assign-box' },
-        (overview.tenants || []).length > 5 && projSearchIn,
-        projListWrap),
-    );
     syncRoleVisibility();
 
     const err = h('div', { class: 'form-err', hidden: true });
@@ -1601,19 +1679,38 @@
 
   function taskDialog(ph, status = 'todo') {
     if (ph.locked) return crDialog(ph.id);
+    const projectUsers = envUsers();
+    const selectedPics = new Set();
     return openForm({
       title: `Task Baru · ${ph.name}`,
       fields: [
         { name: 'title', label: 'Judul Scope / Ticket', required: true, maxlength: 200 },
         { name: 'desc', label: 'Deskripsi', type: 'textarea', maxlength: 4000, placeholder: 'Tulis deskripsi atau catatan spesifikasi...' },
         { name: 'priority', label: 'Prioritas', type: 'select', options: PRIO_OPTIONS, value: 'medium' },
-        { name: 'assignee', label: 'PIC (bisa lebih dari satu, pisahkan koma)', placeholder: 'Contoh: meisy, zudev' },
+        {
+          type: 'custom',
+          render: () => h('div', { class: 'field' },
+            h('span', {}, 'PIC'),
+            multiSelectDropdown({
+              placeholder: 'Pilih PIC dari user project ini…',
+              searchPlaceholder: 'Cari user…',
+              items: projectUsers.map((u) => ({ value: u, label: u })),
+              selectedSet: selectedPics,
+              emptyText: 'Belum ada user di project ini.',
+            })),
+        },
         { name: 'due', label: 'Deadline', type: 'date' },
       ],
       submit: 'Tambah',
       onSubmit: (v) => {
-        const assignees = (v.assignee || '').split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
-        return mutate('POST', '/api/tasks', { phaseId: ph.id, status, ...v, assignees });
+        const assignees = Array.from(selectedPics);
+        return mutate('POST', '/api/tasks', {
+          phaseId: ph.id,
+          status,
+          ...v,
+          assignees,
+          assignee: assignees.join(', '),
+        });
       },
     });
   }
@@ -2436,6 +2533,15 @@
     const isSuper = Boolean((S.me && S.me.isSuperAdmin) || (S.me && S.me.user === 'admin'));
     if (ui.view === 'admin' && !isSuper) {
       ui.view = 'timeline';
+    }
+    if (!isSuper && (!Array.isArray(S.tenants) || !S.tenants.length)) {
+      $('#app').replaceChildren(
+        h('div', { class: 'panel empty', style: { padding: '40px 20px' } },
+          h('p', {}, 'Akun Anda belum memiliki akses ke project mana pun.'),
+          h('p', { class: 'small muted', style: { marginTop: '6px' } }, 'Hubungi Admin untuk mendapatkan akses project, atau klik nama akun Anda di kanan atas untuk ganti password / logout.')),
+      );
+      renderDrawer();
+      return;
     }
     $('#app').replaceChildren(
       ui.view === 'admin'

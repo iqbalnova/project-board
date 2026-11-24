@@ -508,9 +508,16 @@ function allowedTenantsFor(username) {
 }
 
 function usersForTenant(tenantSlug) {
-  const out = new Set(['admin']);
+  const out = new Set();
+  // Anggota regular yang di-assign ke project ini terlebih dahulu
   for (const u of Object.values(store.users)) {
-    if (u.role === 'superadmin' || u.username === 'admin' || (Array.isArray(u.tenants) && u.tenants.includes(tenantSlug))) {
+    if (u.role !== 'superadmin' && u.username !== SUPER_ADMIN_USER && Array.isArray(u.tenants) && u.tenants.includes(tenantSlug)) {
+      out.add(u.username);
+    }
+  }
+  // Lalu Admin / Super Admin
+  for (const u of Object.values(store.users)) {
+    if (u.role === 'superadmin' || u.username === SUPER_ADMIN_USER) {
       out.add(u.username);
     }
   }
@@ -707,12 +714,12 @@ const stateWithMeta = (user, tenantSlug = activeTenantSlug) => {
   const allowed = allowedTenantsFor(user);
   let t = store.tenants[tenantSlug];
   if (!t || !allowed.some((x) => x.slug === t.slug)) {
-    t = allowed[0] || Object.values(store.tenants)[0];
+    t = allowed[0] || null;
   }
-  const slug = t ? t.slug : 'main';
-  const board = t ? t.board : db;
-  const tenantUsers = usersForTenant(slug);
-  if (user && !tenantUsers.includes(user)) tenantUsers.push(user);
+  const slug = t ? t.slug : '';
+  const board = t ? t.board : { rev: 0, projectDesc: '', projectLinks: [], phases: [], tasks: [], changes: [], log: [] };
+  const tenantUsers = t ? usersForTenant(slug) : [];
+  if (t && user && !tenantUsers.includes(user)) tenantUsers.push(user);
 
   return {
     ...board,
@@ -721,7 +728,7 @@ const stateWithMeta = (user, tenantSlug = activeTenantSlug) => {
       name: t.name,
       desc: board.projectDesc || '',
       links: board.projectLinks || [],
-    } : { slug: 'main', name: 'Project Utama', desc: '', links: [] },
+    } : null,
     tenants: allowed.map((x) => ({
       slug: x.slug,
       name: x.name,
@@ -733,6 +740,7 @@ const stateWithMeta = (user, tenantSlug = activeTenantSlug) => {
       user,
       role: isSuperAdmin(user) ? 'superadmin' : 'user',
       isSuperAdmin: isSuperAdmin(user),
+      isEnvSuperAdmin: user === SUPER_ADMIN_USER,
       authRequired: isAuthRequired(),
       users: tenantUsers,
     },
@@ -767,7 +775,7 @@ function buildAdminOverview() {
       tasksCount: (t.board.tasks || []).length,
       doneCount: (t.board.tasks || []).filter((x) => x.status === 'done').length,
       members: Object.values(store.users)
-        .filter((u) => u.role === 'superadmin' || u.username === SUPER_ADMIN_USER || (Array.isArray(u.tenants) && u.tenants.includes(t.slug)))
+        .filter((u) => u.role !== 'superadmin' && u.username !== SUPER_ADMIN_USER && Array.isArray(u.tenants) && u.tenants.includes(t.slug))
         .map((u) => u.username),
     })),
     users: Object.values(store.users).map((u) => ({
@@ -784,6 +792,28 @@ function buildAdminOverview() {
 
 route('GET', '/api/state', ({ user }) => stateWithMeta(user, activeTenantSlug));
 route('GET', '/api/rev', () => ({ rev: db.rev, latestLog: db.log[0] || null, tenant: activeTenantSlug }));
+
+/* ---------- Auth: Self-Service Ganti Password ---------- */
+route('POST', '/api/auth/password', ({ body, user }) => {
+  if (!user) throw new HttpError(401, 'Silakan login terlebih dahulu');
+  if (user === SUPER_ADMIN_USER) {
+    throw forbidden('Password Super Admin utama diatur lewat environment variable (.env)');
+  }
+  const u = store.users[user];
+  if (!u) throw notFound('User tidak ditemukan');
+  const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : '';
+  const newPassword = typeof body.newPassword === 'string' ? body.newPassword.trim() : '';
+  if (u.password && !safeEq(u.password, currentPassword)) {
+    throw bad('Password lama tidak sesuai');
+  }
+  if (!newPassword || newPassword.length < 3) {
+    throw bad('Password baru minimal 3 karakter');
+  }
+  u.password = newPassword;
+  store.authEnabled = true;
+  saveMetaAndTenant(null);
+  return { ok: true };
+});
 
 /* ---------- Super Admin: Project & User Management ---------- */
 route('GET', '/api/admin/overview', ({ user }) => {
@@ -1250,9 +1280,13 @@ function readBody(req) {
 const SPA_PATH_RE = /^\/(?:(timeline|kanban|card\/[a-zA-Z0-9_-]+|kanban\/card\/[a-zA-Z0-9_-]+)|([a-zA-Z0-9_-]+)(?:\/(timeline|kanban|card\/[a-zA-Z0-9_-]+|kanban\/card\/[a-zA-Z0-9_-]+))?)\/?$/;
 
 function applyRequestTenantContext(req, parsedUrl, user) {
+  if (parsedUrl.pathname.startsWith('/api/auth/')) return null;
   const allowed = allowedTenantsFor(user);
   if (!allowed.length) {
-    throw forbidden('Akun Anda belum ditugaskan ke Project / Tenant mana pun. Hubungi Super Admin.');
+    if (req.method === 'GET' && (parsedUrl.pathname === '/api/state' || parsedUrl.pathname === '/api/rev')) {
+      return null;
+    }
+    throw forbidden('Akun Anda belum di-assign ke project mana pun. Hubungi Admin.');
   }
   const reqSlug = slugify(req.headers['x-tenant'] || parsedUrl.searchParams.get('tenant') || '');
   let target = reqSlug ? allowed.find((t) => t.slug === reqSlug) : null;
