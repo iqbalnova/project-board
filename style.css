@@ -1266,6 +1266,85 @@ dialog:has(.wide) { width: min(640px, calc(100vw - 24px)); }
   flex-wrap: wrap;
 }
 
+/* Notification & Activity Feed Modal (Infinite Scroll + Pagination) */
+.notif-top-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px !important;
+  width: auto !important;
+  min-width: 28px;
+}
+.notif-modal-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.notif-modal-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.notif-modal-toolbar input[type="search"] {
+  flex: 1;
+  min-width: 160px;
+  height: 30px;
+  padding: 4px 10px;
+  font-size: 12.5px;
+}
+.notif-feed-list {
+  max-height: 55vh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  display: grid;
+}
+.notif-feed-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-subtle);
+  display: grid;
+  gap: 4px;
+  font-size: 12.5px;
+}
+.notif-feed-item:last-child {
+  border-bottom: 0;
+}
+.notif-feed-item.is-clickable {
+  cursor: pointer;
+}
+.notif-feed-item.is-clickable:hover {
+  background: var(--panel-subtle);
+}
+.notif-feed-item.is-mine {
+  border-left: 3px solid var(--active);
+}
+.notif-feed-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.notif-feed-text {
+  color: var(--text);
+  line-height: 1.45;
+  word-break: break-word;
+}
+.notif-feed-more {
+  padding: 10px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  border-top: 1px solid var(--line-subtle);
+}
+
 @media (max-width: 960px) {
   .split { grid-template-columns: 1fr; }
   .admin-grid { grid-template-columns: 1fr; }

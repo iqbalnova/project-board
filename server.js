@@ -29,7 +29,7 @@ const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 const MULTI_FILE = path.join(DATA_DIR, 'multi_db.json');
 const MAX_BODY = 5 * 1024 * 1024;
-const LOG_LIMIT = 500;
+const LOG_LIMIT = 2000;
 const DAY = 86400000;
 
 let Pool = null;
@@ -182,6 +182,7 @@ function normalize(d) {
       text: l.text,
       by: typeof l.by === 'string' ? l.by : '',
       taskId: typeof l.taskId === 'string' ? l.taskId : null,
+      assignees: Array.isArray(l.assignees) ? l.assignees.map((x) => str(x, 60)).filter(Boolean) : [],
     }));
   const projectDesc = str(d.projectDesc, 2000);
   const projectLinks = Array.isArray(d.projectLinks)
@@ -510,7 +511,15 @@ async function saveMetaAndTenant(tenantSlug = null) {
 
 function addLog(text, user, taskId = null) {
   const suffix = user ? ` (oleh ${user})` : '';
-  db.log.unshift({ ts: now(), text: text + suffix, by: user || '', taskId: taskId || null });
+  const task = taskId && db && Array.isArray(db.tasks) ? db.tasks.find((x) => x.id === taskId) : null;
+  const assignees = task && Array.isArray(task.assignees) ? [...task.assignees] : [];
+  db.log.unshift({
+    ts: now(),
+    text: text + suffix,
+    by: user || '',
+    taskId: taskId || null,
+    assignees,
+  });
   if (db.log.length > LOG_LIMIT) db.log.length = LOG_LIMIT;
 }
 
@@ -749,6 +758,7 @@ const stateWithMeta = (user, tenantSlug = activeTenantSlug) => {
 
   return {
     ...board,
+    log: Array.isArray(board.log) ? board.log.slice(0, 30) : [],
     tenant: t ? {
       slug: t.slug,
       name: t.name,
@@ -820,6 +830,84 @@ function buildAdminOverview() {
 
 route('GET', '/api/state', ({ user }) => stateWithMeta(user, activeTenantSlug));
 route('GET', '/api/rev', () => ({ rev: db.rev, latestLog: db.log[0] || null, tenant: activeTenantSlug }));
+
+/* ---------- Notifikasi & Riwayat (Paginated + Filter User/Project) ---------- */
+route('GET', '/api/notifications', ({ req, user }) => {
+  const parsed = new URL(req.url, 'http://localhost');
+  const scope = parsed.searchParams.get('scope') || 'project'; // 'project' | 'mine' | 'all'
+  const q = (parsed.searchParams.get('q') || '').trim().toLowerCase();
+  const limit = Math.max(5, Math.min(100, parseInt(parsed.searchParams.get('limit'), 10) || 20));
+  const reqPage = Math.max(1, parseInt(parsed.searchParams.get('page'), 10) || 1);
+
+  const allowed = allowedTenantsFor(user);
+  const targetTenants = scope === 'project'
+    ? allowed.filter((t) => t.slug === activeTenantSlug)
+    : allowed;
+  const scannedTenants = targetTenants.length ? targetTenants : (allowed[0] ? [allowed[0]] : []);
+
+  const userLower = (user || '').toLowerCase();
+  const userWordRe = userLower
+    ? new RegExp(`(^|[^a-z0-9._-])${userLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9._-]|$)`, 'i')
+    : null;
+
+  const allItems = [];
+  for (const t of scannedTenants) {
+    const tBoard = t.board || {};
+    const taskMap = new Map((tBoard.tasks || []).map((x) => [x.id, x]));
+    const logs = Array.isArray(tBoard.log) ? tBoard.log : [];
+
+    for (const l of logs) {
+      const task = l.taskId ? taskMap.get(l.taskId) : null;
+      const pics = Array.from(new Set([
+        ...(Array.isArray(l.assignees) ? l.assignees : []),
+        ...(task && Array.isArray(task.assignees) ? task.assignees : []),
+      ]));
+      const isPic = Boolean(userLower && pics.some((p) => p.toLowerCase() === userLower));
+      const isCommenter = Boolean(userLower && task && Array.isArray(task.comments) && task.comments.some((c) => (c.user || '').toLowerCase() === userLower));
+      const isMentioned = Boolean(userWordRe && userWordRe.test(l.text || ''));
+      const isByMe = Boolean(userLower && (l.by || '').toLowerCase() === userLower);
+      const isRelatedToMe = isPic || isCommenter || isMentioned || isByMe;
+
+      if (scope === 'mine' && !isRelatedToMe) continue;
+
+      if (q) {
+        const hay = `${l.text || ''} ${t.name || ''} ${task ? task.title : ''} ${pics.join(' ')} ${l.by || ''}`.toLowerCase();
+        if (!hay.includes(q)) continue;
+      }
+
+      allItems.push({
+        ts: l.ts,
+        text: l.text,
+        by: l.by || '',
+        taskId: l.taskId || null,
+        taskTitle: task ? task.title : '',
+        assignees: pics,
+        isPic,
+        isRelatedToMe,
+        tenantSlug: t.slug,
+        tenantName: t.name,
+      });
+    }
+  }
+
+  allItems.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+
+  const total = allItems.length;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const page = Math.min(reqPage, totalPages);
+  const offset = (page - 1) * limit;
+  const items = allItems.slice(offset, offset + limit);
+
+  return {
+    scope,
+    page,
+    limit,
+    total,
+    totalPages,
+    hasMore: offset + items.length < total,
+    items,
+  };
+});
 
 /* ---------- Auth: Self-Service Ganti Password ---------- */
 route('POST', '/api/auth/password', async ({ body, user }) => {

@@ -93,12 +93,14 @@
   function updateNotifButton() {
     const btn = document.getElementById('btn-notif');
     if (!btn) return;
-    const browserPerm = ('Notification' in window) ? Notification.permission : 'unsupported';
     const on = ui.notifEnabled;
-    btn.innerHTML = on ? BELL_ON_ICON : BELL_OFF_ICON;
+    btn.classList.add('notif-top-btn');
     btn.classList.toggle('is-on', on);
-    const permTxt = browserPerm === 'granted' ? 'Notifikasi Desktop & In-App Aktif' : 'Notifikasi In-App Aktif (Klik untuk izinkan Notifikasi Desktop)';
-    btn.title = on ? `${permTxt} · Klik untuk matikan/aktifkan` : 'Notifikasi Nonaktif (Klik untuk aktifkan)';
+    const badgeHtml = ui.unreadLogs > 0 ? `<span class="pill" style="margin-left:0">${ui.unreadLogs}</span>` : '';
+    btn.innerHTML = `${on ? BELL_ON_ICON : BELL_OFF_ICON}${badgeHtml}`;
+    btn.title = ui.unreadLogs > 0
+      ? `Notifikasi & Update (${ui.unreadLogs} baru)`
+      : 'Notifikasi & Update Project';
     btn.setAttribute('aria-label', btn.title);
   }
 
@@ -355,9 +357,11 @@
 
   function updateLogBadge() {
     const lb = document.getElementById('log-badge');
-    if (!lb) return;
-    lb.textContent = ui.unreadLogs;
-    lb.hidden = !ui.unreadLogs;
+    if (lb) {
+      lb.textContent = ui.unreadLogs;
+      lb.hidden = !ui.unreadLogs;
+    }
+    updateNotifButton();
   }
 
   function showNotifBanner(logItem, count = 1) {
@@ -1786,26 +1790,195 @@
     await mutate('POST', `/api/phases/${p.id}/lock`, { locked: !p.locked });
   });
 
-  function logDialog() {
+  function logDialog(defaultScope) {
+    notifDialog(typeof defaultScope === 'string' ? defaultScope : 'project');
+  }
+
+  function notifDialog(initialScope = 'project') {
     ui.unreadLogs = 0;
     updateLogBadge();
+
+    const dlg = $('#dlg');
+    const PAGE_LIMIT = 20;
+    const multiProjects = Array.isArray(S.tenants) && S.tenants.length > 1;
+    let scope = initialScope;
+    let query = '';
+    let currentPage = 1;
+    let totalPages = 1;
+    let totalItems = 0;
+    let hasMore = false;
+    let isLoading = false;
+    let loadedItems = [];
+
     const fmtTs = (ts) => new Date(ts).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' });
-    infoDialog('Riwayat Perubahan', S.log.length
-      ? h('ul', { class: 'log' }, S.log.map((l) => {
-          const targetTask = l.taskId ? S.tasks.find((x) => x.id === l.taskId) : null;
-          return h('li', {
-            class: targetTask ? 'is-link' : '',
-            title: targetTask ? `Klik untuk buka card #${targetTask.id}` : '',
-            onclick: targetTask ? () => {
-              const dlg = $('#dlg');
-              if (dlg && dlg.open) dlg.close();
-              openTaskDrawer(targetTask);
-            } : null,
+
+    const listEl = h('div', { class: 'notif-feed-list' });
+    const pagerInfo = h('span', {}, 'Memuat…');
+    const prevBtn = h('button', {
+      type: 'button', class: 'btn xs',
+      onclick: () => { if (currentPage > 1 && !isLoading) fetchPage(currentPage - 1, false); },
+    }, '←');
+    const pageLabel = h('span', {}, '1 / 1');
+    const nextBtn = h('button', {
+      type: 'button', class: 'btn xs',
+      onclick: () => { if (currentPage < totalPages && !isLoading) fetchPage(currentPage + 1, false); },
+    }, '→');
+
+    const pagerEl = h('div', { class: 'pager', style: { marginTop: '8px' } },
+      pagerInfo,
+      h('div', { class: 'pager-btns' }, prevBtn, pageLabel, nextBtn));
+
+    // Infinite scroll handler: saat scroll mendekati bawah, muat halaman berikutnya otomatis
+    listEl.addEventListener('scroll', () => {
+      if (isLoading || !hasMore) return;
+      if (listEl.scrollTop + listEl.clientHeight >= listEl.scrollHeight - 48) {
+        fetchPage(currentPage + 1, true);
+      }
+    });
+
+    const openFromNotif = async (item) => {
+      if (!item.taskId) return;
+      dlg.close();
+      if (item.tenantSlug && item.tenantSlug !== currentTenantSlug()) {
+        ui.pendingRouteTaskId = item.taskId;
+        await switchTenant(item.tenantSlug, true, 'kanban');
+        const found = (S.tasks || []).find((x) => x.id === item.taskId);
+        if (found) openTaskDrawer(found);
+      } else {
+        const found = (S.tasks || []).find((x) => x.id === item.taskId);
+        if (found) openTaskDrawer(found);
+        else toast(`Card #${item.taskId} sudah tidak ada`, true);
+      }
+    };
+
+    function renderItems() {
+      if (!loadedItems.length && !isLoading) {
+        listEl.replaceChildren(
+          h('div', { class: 'empty', style: { padding: '28px 14px' } },
+            scope === 'mine'
+              ? 'Belum ada notifikasi yang terkait langsung dengan tugas / PIC Anda.'
+              : 'Belum ada riwayat aktivitas.'),
+        );
+      } else {
+        const rows = loadedItems.map((it) => {
+          const canOpen = Boolean(it.taskId);
+          return h('div', {
+            class: 'notif-feed-item' + (canOpen ? ' is-clickable' : '') + (it.isPic ? ' is-mine' : ''),
+            title: canOpen ? `Klik untuk membuka card #${it.taskId}` : '',
+            onclick: canOpen ? () => openFromNotif(it) : null,
           },
-          h('time', {}, fmtTs(l.ts) + (targetTask ? ` · #${targetTask.id} ↗` : '')),
-          l.text);
-        }))
-      : h('p', { class: 'empty' }, 'Belum ada riwayat.'));
+          h('div', { class: 'notif-feed-meta' },
+            h('time', {}, fmtTs(it.ts)),
+            (scope === 'all' || multiProjects) && it.tenantName && badge(it.tenantName, ''),
+            it.isPic && badge('PIC Anda', 'st-active'),
+            it.taskId && badge(`#${it.taskId} ↗`, '')),
+          h('div', { class: 'notif-feed-text' }, it.text));
+        });
+
+        if (isLoading) {
+          rows.push(h('div', { class: 'notif-feed-more' }, 'Memuat lebih banyak…'));
+        } else if (hasMore) {
+          rows.push(h('div', {
+            class: 'notif-feed-more',
+            style: { cursor: 'pointer' },
+            onclick: () => fetchPage(currentPage + 1, true),
+          }, 'Scroll ke bawah atau klik untuk muat lebih banyak ↓'));
+        }
+        listEl.replaceChildren(...rows);
+      }
+
+      pagerInfo.textContent = totalItems
+        ? `Menampilkan ${loadedItems.length} dari ${totalItems} update`
+        : '0 update';
+      pageLabel.textContent = `${currentPage} / ${totalPages}`;
+      prevBtn.disabled = currentPage <= 1 || isLoading;
+      nextBtn.disabled = currentPage >= totalPages || isLoading;
+    }
+
+    async function fetchPage(page, append = false) {
+      isLoading = true;
+      if (append) renderItems();
+      try {
+        const params = new URLSearchParams({
+          scope,
+          page: String(page),
+          limit: String(PAGE_LIMIT),
+          q: query,
+        });
+        const res = await api('GET', `/api/notifications?${params.toString()}`);
+        currentPage = res.page || 1;
+        totalPages = res.totalPages || 1;
+        totalItems = res.total || 0;
+        hasMore = Boolean(res.hasMore);
+        const incoming = Array.isArray(res.items) ? res.items : [];
+        loadedItems = append ? [...loadedItems, ...incoming] : incoming;
+        if (!append) listEl.scrollTop = 0;
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        isLoading = false;
+        renderItems();
+      }
+    }
+
+    // Scope Tabs: Project Ini | Terkait Saya | Semua Project
+    const scopeBtns = [
+      ['project', 'Project Ini'],
+      ['mine', 'Terkait Saya'],
+      ...(multiProjects ? [['all', 'Semua Project']] : []),
+    ].map(([val, lbl]) => h('button', {
+      type: 'button',
+      class: scope === val ? 'on' : '',
+      onclick: () => {
+        if (scope === val) return;
+        scope = val;
+        scopeBtns.forEach((b) => b.classList.toggle('on', b.dataset.scope === scope));
+        fetchPage(1, false);
+      },
+      dataset: { scope: val },
+    }, lbl));
+
+    let searchTimer;
+    const searchIn = h('input', {
+      type: 'search',
+      placeholder: 'Cari update, card, atau PIC…',
+      oninput: (e) => {
+        query = e.target.value.trim();
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => fetchPage(1, false), 180);
+      },
+    });
+
+    const toggleAlertBtn = h('button', {
+      type: 'button',
+      class: 'btn xs',
+      onclick: async () => {
+        if ('Notification' in window && Notification.permission === 'default') {
+          try { await Notification.requestPermission(); } catch (_) { /* abaikan */ }
+          ui.notifEnabled = true;
+        } else {
+          ui.notifEnabled = !ui.notifEnabled;
+        }
+        store.set('notifEnabled', ui.notifEnabled ? '1' : '0');
+        updateNotifButton();
+        toggleAlertBtn.textContent = ui.notifEnabled ? 'Suara & Popup: Aktif' : 'Suara & Popup: Nonaktif';
+      },
+    }, ui.notifEnabled ? 'Suara & Popup: Aktif' : 'Suara & Popup: Nonaktif');
+
+    dlg.replaceChildren(
+      h('div', { class: 'dlg-in wide' },
+        h('div', { class: 'notif-modal-top' },
+          h('h2', { style: { marginBottom: 0 } }, 'Notifikasi & Update'),
+          toggleAlertBtn),
+        h('div', { class: 'notif-modal-toolbar' },
+          h('div', { class: 'seg-group' }, scopeBtns),
+          searchIn),
+        listEl,
+        pagerEl,
+        h('div', { class: 'actions' },
+          h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Tutup'))));
+    dlg.showModal();
+    fetchPage(1, false);
   }
 
   /* ======================= CRYPTO-CHART INTERACTIVE TIMELINE ======================= */
@@ -2573,16 +2746,9 @@
     });
     const btnNotif = $('#btn-notif');
     if (btnNotif) {
-      btnNotif.addEventListener('click', async () => {
-        if ('Notification' in window && Notification.permission === 'default') {
-          try { await Notification.requestPermission(); } catch (_) { /* abaikan */ }
-          ui.notifEnabled = true;
-        } else {
-          ui.notifEnabled = !ui.notifEnabled;
-        }
-        store.set('notifEnabled', ui.notifEnabled ? '1' : '0');
-        updateNotifButton();
-        toast(ui.notifEnabled ? 'Notifikasi perubahan diaktifkan' : 'Notifikasi perubahan dinonaktifkan');
+      btnNotif.addEventListener('click', () => {
+        if (ui.needLogin) return;
+        notifDialog('project');
       });
     }
     const tenantSelect = $('#tenant-select');
