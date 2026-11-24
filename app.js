@@ -463,11 +463,8 @@
     const isEnvSuper = Boolean(S.me && S.me.isEnvSuperAdmin);
     const assignedTenants = Array.isArray(S.tenants) ? S.tenants.map((t) => t.name).join(', ') : '-';
 
-    let pwdSection;
-    if (isEnvSuper) {
-      pwdSection = h('div', { class: 'pwd-box' },
-        h('div', { class: 'small muted' }, 'Password Super Admin utama diatur melalui environment variable (.env).'));
-    } else {
+    let pwdSection = null;
+    if (!isEnvSuper) {
       const oldIn = h('input', { type: 'password', required: true, placeholder: 'Password saat ini', autocomplete: 'current-password' });
       const newIn = h('input', { type: 'password', required: true, placeholder: 'Minimal 3 karakter', minlength: 3, autocomplete: 'new-password' });
       const confirmIn = h('input', { type: 'password', required: true, placeholder: 'Ulangi password baru', minlength: 3, autocomplete: 'new-password' });
@@ -1549,7 +1546,7 @@
               h('div', { class: 'data-main' },
                 h('div', { class: 'data-title' },
                   h('span', {}, u.username),
-                  badge(isEnvRoot ? 'Super Admin (Env)' : (isSuperUser ? 'Admin' : 'User'), isSuperUser ? 'st-active' : '')),
+                  badge(isEnvRoot ? 'Super Admin' : (isSuperUser ? 'Admin' : 'User'), isSuperUser ? 'st-active' : '')),
                 h('div', { class: 'data-sub' }, subText)),
               !isEnvRoot && h('div', { class: 'data-actions' },
                 h('button', {

@@ -797,7 +797,7 @@ route('GET', '/api/rev', () => ({ rev: db.rev, latestLog: db.log[0] || null, ten
 route('POST', '/api/auth/password', ({ body, user }) => {
   if (!user) throw new HttpError(401, 'Silakan login terlebih dahulu');
   if (user === SUPER_ADMIN_USER) {
-    throw forbidden('Password Super Admin utama diatur lewat environment variable (.env)');
+    throw forbidden('Password Super Admin utama tidak dapat diubah dari sini');
   }
   const u = store.users[user];
   if (!u) throw notFound('User tidak ditemukan');
@@ -938,7 +938,7 @@ route('POST', '/api/admin/users', ({ body, user }) => {
   const username = str(body.username, 60).toLowerCase().replace(/[^a-z0-9._-]/g, '');
   if (!username) throw bad('Username wajib diisi (huruf/angka)');
   if (username === SUPER_ADMIN_USER) {
-    throw forbidden('Akun Super Admin utama diatur lewat environment variable dan tidak dapat diubah dari sistem');
+    throw forbidden('Akun Super Admin utama tidak dapat diubah');
   }
   const existing = store.users[username];
   const password = typeof body.password === 'string' ? body.password.trim() : '';
@@ -967,7 +967,7 @@ route('POST', '/api/admin/users', ({ body, user }) => {
 route('DELETE', '/api/admin/users/:username', ({ params, user }) => {
   if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat menghapus User');
   const target = params.username;
-  if (target === SUPER_ADMIN_USER) throw forbidden('Akun Super Admin utama dari environment variable tidak dapat dihapus');
+  if (target === SUPER_ADMIN_USER) throw forbidden('Akun Super Admin utama tidak dapat dihapus');
   if (target === user) throw bad('Tidak dapat menghapus akun yang sedang digunakan');
   if (!store.users[target]) throw notFound('User tidak ditemukan');
   delete store.users[target];
