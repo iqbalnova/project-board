@@ -748,13 +748,13 @@ const stateWithMeta = (user, tenantSlug = activeTenantSlug) => {
 };
 const saved = (user) => { save(activeTenantSlug); return stateWithMeta(user, activeTenantSlug); };
 
-function generateUniqueSlug(name) {
+function generateUniqueSlug(name, ignoreSlug = null) {
   let base = slugify(name);
   if (!base || base.length < 2) base = 'project';
   if (RESERVED_SLUGS.has(base)) base = 'proj-' + base;
   let slug = base;
   let n = 2;
-  while (store.tenants[slug] || RESERVED_SLUGS.has(slug)) {
+  while ((store.tenants[slug] && slug !== ignoreSlug) || RESERVED_SLUGS.has(slug)) {
     slug = `${base}-${n++}`;
   }
   return slug;
@@ -857,13 +857,35 @@ route('POST', '/api/admin/tenants', ({ body, user }) => {
 
 route('PATCH', '/api/admin/tenants/:slug', ({ params, body, user }) => {
   if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat mengubah Project');
-  const t = store.tenants[params.slug];
+  const oldSlug = params.slug;
+  const t = store.tenants[oldSlug];
   if (!t) throw notFound('Project tidak ditemukan');
+
+  let newSlug = oldSlug;
   if (body.name !== undefined) {
     const name = str(body.name, 80);
     if (!name) throw bad('Nama project tidak boleh kosong');
     t.name = name;
+    newSlug = generateUniqueSlug(name, oldSlug);
   }
+  if (newSlug !== oldSlug) {
+    t.slug = newSlug;
+    const rebuilt = {};
+    for (const [k, val] of Object.entries(store.tenants)) {
+      rebuilt[k === oldSlug ? newSlug : k] = val;
+    }
+    store.tenants = rebuilt;
+    for (const u of Object.values(store.users)) {
+      if (Array.isArray(u.tenants)) {
+        u.tenants = Array.from(new Set(u.tenants.map((s) => (s === oldSlug ? newSlug : s))));
+      }
+    }
+    if (activeTenantSlug === oldSlug) {
+      activeTenantSlug = newSlug;
+    }
+    deleteTenantFromPostgres(oldSlug);
+  }
+
   if (body.desc !== undefined) {
     t.board.projectDesc = str(body.desc, 2000);
   }
@@ -886,7 +908,7 @@ route('PATCH', '/api/admin/tenants/:slug', ({ params, body, user }) => {
   saveMetaAndTenant(t.slug);
   return {
     overview: buildAdminOverview(),
-    state: stateWithMeta(user, activeTenantSlug),
+    state: stateWithMeta(user, t.slug),
   };
 });
 

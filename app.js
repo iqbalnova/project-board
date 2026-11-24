@@ -1133,6 +1133,7 @@
     ui.adminOverview = res.overview;
     S = res.state;
     syncTenantFromState(S);
+    syncUrlWithDrawer(ui.drawerTaskId, true);
     render();
     if (msg) toast(msg);
   }
