@@ -1060,7 +1060,13 @@
     dlg.showModal();
   }
 
-  /* ======================= HALAMAN ADMIN: PROJECT & USER (MINIMALIST) ======================= */
+  /* ======================= HALAMAN ADMIN: CRUD PROJECT & USER (TABLE + SEARCH + PAGINATION) ======================= */
+  const ADMIN_PAGE_SIZE = 8;
+  ui.projQ = '';
+  ui.projPage = 1;
+  ui.userQ = '';
+  ui.userPage = 1;
+
   let adminLoading = false;
   async function loadAdminOverview() {
     if (adminLoading) return;
@@ -1075,6 +1081,276 @@
     }
   }
 
+  function applyAdminResp(res, msg) {
+    ui.adminOverview = res.overview;
+    S = res.state;
+    syncTenantFromState(S);
+    render();
+    if (msg) toast(msg);
+  }
+
+  function projectCrudDialog(proj = null) {
+    const dlg = $('#dlg');
+    const overview = ui.adminOverview || { tenants: S.tenants || [], users: [] };
+    const isEdit = Boolean(proj);
+    const regularUsers = (overview.users || []).filter((u) => !u.isEnvSuperAdmin && u.role !== 'superadmin');
+
+    const nameIn = h('input', {
+      value: proj ? proj.name : '',
+      placeholder: 'Nama project',
+      required: true,
+      maxlength: 80,
+    });
+    const descIn = h('textarea', {
+      rows: 3,
+      maxlength: 2000,
+      placeholder: 'Deskripsi singkat project (opsional)…',
+    }, proj ? (proj.desc || '') : '');
+
+    // Links state
+    const links = Array.isArray(proj && proj.links) ? proj.links.map((l) => ({ ...l })) : [];
+    const linksWrap = h('div', { class: 'links-list' });
+    const lTitleIn = h('input', { name: 'ltitle', placeholder: 'Label (mis: PRD / Figma / Repo)', maxlength: 120 });
+    const lUrlIn = h('input', { name: 'lurl', placeholder: 'https://…', maxlength: 1000 });
+
+    const renderLinks = () => {
+      linksWrap.replaceChildren(
+        ...links.map((l, idx) => h('div', { class: 'link-card' },
+          h('a', { href: l.url, target: '_blank', rel: 'noopener noreferrer' }, `${l.title} ↗`),
+          h('button', {
+            type: 'button',
+            title: 'Hapus link',
+            onclick: () => { links.splice(idx, 1); renderLinks(); },
+          }, '×'))),
+      );
+    };
+    renderLinks();
+
+    const addLinkRow = h('div', { class: 'link-add-row' },
+      lTitleIn,
+      lUrlIn,
+      h('button', {
+        type: 'button',
+        class: 'btn xs',
+        onclick: () => {
+          let url = lUrlIn.value.trim();
+          if (!url) return;
+          if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+          links.push({ id: String(Date.now()), title: lTitleIn.value.trim() || url, url });
+          lTitleIn.value = '';
+          lUrlIn.value = '';
+          renderLinks();
+        },
+      }, '+ Link'));
+
+    // Members state with search filter inside modal
+    const selectedMembers = new Set(
+      isEdit
+        ? (proj.members || [])
+        : regularUsers.map((u) => u.username),
+    );
+    let memberFilter = '';
+    const memberSearchIn = h('input', {
+      type: 'search',
+      placeholder: 'Cari anggota…',
+      oninput: (e) => { memberFilter = e.target.value.trim().toLowerCase(); renderMemberCheckboxes(); },
+    });
+    const memberListWrap = h('div', { class: 'assign-list' });
+    const renderMemberCheckboxes = () => {
+      const filtered = regularUsers.filter((u) => !memberFilter || u.username.toLowerCase().includes(memberFilter));
+      if (!filtered.length) {
+        memberListWrap.replaceChildren(h('div', { class: 'small muted', style: { padding: '4px' } }, 'Tidak ada user.'));
+        return;
+      }
+      memberListWrap.replaceChildren(
+        ...filtered.map((u) => {
+          const checked = selectedMembers.has(u.username);
+          const cb = h('input', {
+            type: 'checkbox',
+            checked,
+            onchange: (e) => {
+              if (e.target.checked) selectedMembers.add(u.username);
+              else selectedMembers.delete(u.username);
+            },
+          });
+          return h('label', { class: 'assign-item' }, cb, h('span', {}, u.username));
+        }),
+      );
+    };
+    renderMemberCheckboxes();
+
+    const err = h('div', { class: 'form-err', hidden: true });
+    const submitBtn = h('button', { type: 'submit', class: 'btn primary' }, isEdit ? 'Simpan' : 'Buat Project');
+
+    const form = h('form', {
+      class: 'form',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        err.hidden = true;
+        // Jika ada input link yang belum ditekan "+ Link", ikutkan otomatis
+        if (lUrlIn.value.trim()) {
+          let url = lUrlIn.value.trim();
+          if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+          links.push({ id: String(Date.now()), title: lTitleIn.value.trim() || url, url });
+        }
+        submitBtn.disabled = true;
+        try {
+          const payload = {
+            name: nameIn.value.trim(),
+            desc: descIn.value.trim(),
+            links,
+            members: Array.from(selectedMembers),
+          };
+          const res = isEdit
+            ? await api('PATCH', `/api/admin/tenants/${proj.slug}`, payload)
+            : await api('POST', '/api/admin/tenants', payload);
+          dlg.close();
+          applyAdminResp(res, isEdit ? 'Project diperbarui' : 'Project dibuat');
+        } catch (ex) {
+          err.textContent = ex.message;
+          err.hidden = false;
+        } finally {
+          submitBtn.disabled = false;
+        }
+      },
+    },
+    h('label', { class: 'field' }, h('span', {}, 'Nama Project'), nameIn),
+    h('label', { class: 'field' }, h('span', {}, 'Deskripsi'), descIn),
+    h('div', { class: 'field' },
+      h('span', {}, 'Link Dokumentasi'),
+      linksWrap,
+      addLinkRow),
+    regularUsers.length > 0 && h('div', { class: 'field' },
+      h('span', {}, `Anggota Project (${regularUsers.length} user)`),
+      h('div', { class: 'assign-box' },
+        regularUsers.length > 5 && memberSearchIn,
+        memberListWrap)),
+    err,
+    h('div', { class: 'actions-row' },
+      h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Batal'),
+      submitBtn));
+
+    dlg.replaceChildren(
+      h('div', { class: 'dlg-in wide' },
+        h('h2', {}, isEdit ? `Edit Project · ${proj.name}` : 'Project Baru'),
+        form));
+    dlg.showModal();
+    setTimeout(() => nameIn.focus(), 0);
+  }
+
+  function userCrudDialog(userObj = null) {
+    const dlg = $('#dlg');
+    const overview = ui.adminOverview || { tenants: [], users: [] };
+    const isEdit = Boolean(userObj);
+
+    const uNameIn = h('input', {
+      value: isEdit ? userObj.username : '',
+      placeholder: 'Username (huruf/angka)',
+      required: true,
+      maxlength: 60,
+      readonly: isEdit,
+    });
+    const uPassIn = h('input', {
+      type: 'password',
+      placeholder: isEdit ? 'Kosongkan jika tidak diubah' : 'Password',
+      required: !isEdit,
+      maxlength: 100,
+    });
+    const uRoleIn = h('select', {},
+      h('option', { value: 'user', selected: !isEdit || userObj.role !== 'superadmin' }, 'User'),
+      h('option', { value: 'superadmin', selected: isEdit && userObj.role === 'superadmin' }, 'Admin'));
+
+    const selectedProjects = new Set(
+      isEdit ? (userObj.tenants || []) : (overview.tenants || []).map((t) => t.slug),
+    );
+    let projFilter = '';
+    const projSearchIn = h('input', {
+      type: 'search',
+      placeholder: 'Cari project…',
+      oninput: (e) => { projFilter = e.target.value.trim().toLowerCase(); renderProjCheckboxes(); },
+    });
+    const projListWrap = h('div', { class: 'assign-list' });
+    const assignFieldWrap = h('div', { class: 'field' });
+
+    const renderProjCheckboxes = () => {
+      const allTenants = overview.tenants || [];
+      const filtered = allTenants.filter((t) => !projFilter || t.name.toLowerCase().includes(projFilter) || t.slug.includes(projFilter));
+      if (!filtered.length) {
+        projListWrap.replaceChildren(h('div', { class: 'small muted', style: { padding: '4px' } }, 'Tidak ada project.'));
+        return;
+      }
+      projListWrap.replaceChildren(
+        ...filtered.map((t) => {
+          const checked = selectedProjects.has(t.slug);
+          const cb = h('input', {
+            type: 'checkbox',
+            checked,
+            onchange: (e) => {
+              if (e.target.checked) selectedProjects.add(t.slug);
+              else selectedProjects.delete(t.slug);
+            },
+          });
+          return h('label', { class: 'assign-item' }, cb, h('span', {}, t.name));
+        }),
+      );
+    };
+    renderProjCheckboxes();
+
+    const syncRoleVisibility = () => {
+      assignFieldWrap.hidden = uRoleIn.value === 'superadmin';
+    };
+    uRoleIn.addEventListener('change', syncRoleVisibility);
+    assignFieldWrap.append(
+      h('span', {}, 'Akses Project'),
+      h('div', { class: 'assign-box' },
+        (overview.tenants || []).length > 5 && projSearchIn,
+        projListWrap),
+    );
+    syncRoleVisibility();
+
+    const err = h('div', { class: 'form-err', hidden: true });
+    const submitBtn = h('button', { type: 'submit', class: 'btn primary' }, isEdit ? 'Simpan' : 'Tambah User');
+
+    const form = h('form', {
+      class: 'form',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        err.hidden = true;
+        submitBtn.disabled = true;
+        try {
+          const res = await api('POST', '/api/admin/users', {
+            username: uNameIn.value.trim(),
+            password: uPassIn.value.trim(),
+            role: uRoleIn.value,
+            tenants: Array.from(selectedProjects),
+          });
+          dlg.close();
+          applyAdminResp(res, isEdit ? 'User diperbarui' : 'User ditambahkan');
+        } catch (ex) {
+          err.textContent = ex.message;
+          err.hidden = false;
+        } finally {
+          submitBtn.disabled = false;
+        }
+      },
+    },
+    h('label', { class: 'field' }, h('span', {}, 'Username'), uNameIn),
+    h('label', { class: 'field' }, h('span', {}, isEdit ? 'Password Baru (Opsional)' : 'Password'), uPassIn),
+    h('label', { class: 'field' }, h('span', {}, 'Role'), uRoleIn),
+    assignFieldWrap,
+    err,
+    h('div', { class: 'actions-row' },
+      h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Batal'),
+      submitBtn));
+
+    dlg.replaceChildren(
+      h('div', { class: 'dlg-in' },
+        h('h2', {}, isEdit ? `Edit User · ${userObj.username}` : 'User Baru'),
+        form));
+    dlg.showModal();
+    setTimeout(() => (isEdit ? uPassIn : uNameIn).focus(), 0);
+  }
+
   function adminDashboardView() {
     const me = (S.me && S.me.user) || 'admin';
     if (!ui.adminOverview) {
@@ -1083,236 +1359,199 @@
     }
 
     const overview = ui.adminOverview;
-    const curSlug = currentTenantSlug();
 
-    const applyAdminResp = (res, msg) => {
-      ui.adminOverview = res.overview;
-      S = res.state;
-      syncTenantFromState(S);
-      render();
-      if (msg) toast(msg);
-    };
+    // 1. KOLOM PROJECT (Search + Compact List + Pagination)
+    const pq = (ui.projQ || '').trim().toLowerCase();
+    const filteredProjects = overview.tenants.filter((t) =>
+      !pq || t.name.toLowerCase().includes(pq) || t.slug.toLowerCase().includes(pq) || (t.desc && t.desc.toLowerCase().includes(pq)));
+    const totalProjPages = Math.max(1, Math.ceil(filteredProjects.length / ADMIN_PAGE_SIZE));
+    if (ui.projPage > totalProjPages) ui.projPage = totalProjPages;
+    const projStart = (ui.projPage - 1) * ADMIN_PAGE_SIZE;
+    const pagedProjects = filteredProjects.slice(projStart, projStart + ADMIN_PAGE_SIZE);
 
-    // 1. KOLOM KIRI: PROJECT
-    const nameIn = h('input', { placeholder: 'Nama project baru…', required: true, maxlength: 80 });
-    const regularUsers = overview.users.filter((u) => !u.isEnvSuperAdmin && u.role !== 'superadmin');
-    const selectedMembers = new Set(regularUsers.map((u) => u.username));
-    const memberPillsWrap = h('div', { class: 'pic-pills-wrap' });
-    const renderNewProjectMembers = () => {
-      memberPillsWrap.replaceChildren(
-        ...regularUsers.map((u) => {
-          const on = selectedMembers.has(u.username);
-          return h('button', {
-            type: 'button',
-            class: 'pic-pill' + (on ? ' is-active' : ''),
-            onclick: () => {
-              if (on) selectedMembers.delete(u.username);
-              else selectedMembers.add(u.username);
-              renderNewProjectMembers();
-            },
-          },
-          h('span', { class: 'pic-name' }, u.username),
-          on && h('span', { class: 'pic-chk' }, '✓'));
-        }),
-      );
-    };
-    renderNewProjectMembers();
+    const projSearchIn = h('input', {
+      type: 'search',
+      placeholder: 'Cari project…',
+      value: ui.projQ,
+      oninput: (e) => {
+        ui.projQ = e.target.value;
+        ui.projPage = 1;
+        const pos = e.target.selectionStart;
+        render();
+        const el = document.getElementById('admin-proj-search');
+        if (el) { el.focus(); el.setSelectionRange(pos, pos); }
+      },
+      id: 'admin-proj-search',
+    });
 
-    const createProjectForm = h('form', {
-      class: 'admin-box',
-      onsubmit: safe(async (e) => {
-        e.preventDefault();
-        const res = await api('POST', '/api/admin/tenants', {
-          name: nameIn.value.trim(),
-          members: Array.from(selectedMembers),
-        });
-        applyAdminResp(res, `Project "${res.state.tenant.name}" dibuat`);
-      }),
-    },
-    h('div', { class: 'admin-inline-row' },
-      nameIn,
-      h('button', { type: 'submit', class: 'btn primary small' }, 'Tambah')),
-    regularUsers.length > 0 && memberPillsWrap);
+    const projectRows = pagedProjects.length
+      ? h('div', { class: 'data-list' },
+          pagedProjects.map((t) => {
+            const linksCount = (t.links || []).length;
+            const metaParts = [
+              `/${t.slug}`,
+              `${t.members.length} anggota`,
+              `${t.doneCount}/${t.tasksCount} task`,
+            ];
+            if (linksCount) metaParts.push(`${linksCount} link`);
+            if (t.desc) metaParts.push(t.desc);
 
-    const projectList = h('div', { class: 'admin-list' },
-      overview.tenants.map((t) => {
-        const isCur = t.slug === curSlug;
-        return h('div', { class: 'admin-card' + (isCur ? ' is-current' : '') },
-          h('div', { class: 'admin-card-top' },
-            h('div', { class: 'admin-card-title' },
-              h('span', {}, t.name),
-              h('span', { class: 'muted small' }, `/${t.slug} · ${t.doneCount}/${t.tasksCount} task`)),
-            h('div', { style: { display: 'flex', gap: '4px', flexWrap: 'wrap' } },
-              h('button', {
-                type: 'button', class: 'btn xs primary',
-                onclick: () => switchTenant(t.slug, true, 'timeline'),
-              }, 'Timeline'),
-              h('button', {
-                type: 'button', class: 'btn xs',
-                onclick: () => switchTenant(t.slug, true, 'kanban'),
-              }, 'Kanban'),
-              h('button', {
-                type: 'button', class: 'btn xs',
-                onclick: safe(async () => {
-                  const nextName = prompt('Nama project:', t.name);
-                  if (!nextName || !nextName.trim() || nextName.trim() === t.name) return;
-                  const res = await api('PATCH', `/api/admin/tenants/${t.slug}`, { name: nextName.trim() });
-                  applyAdminResp(res, 'Nama project diperbarui');
-                }),
-              }, 'Rename'),
-              overview.tenants.length > 1 && h('button', {
-                type: 'button', class: 'btn xs danger',
-                onclick: safe(async () => {
-                  if (!confirm(`Hapus project "${t.name}"?`)) return;
-                  const res = await api('DELETE', `/api/admin/tenants/${t.slug}`);
-                  applyAdminResp(res, `Project "${t.name}" dihapus`);
-                }),
-              }, 'Hapus'))),
-          regularUsers.length > 0 && h('div', { class: 'pic-pills-wrap' },
-            regularUsers.map((u) => {
-              const hasAccess = t.members.includes(u.username);
-              return h('button', {
-                type: 'button',
-                class: 'pic-pill' + (hasAccess ? ' is-active' : ''),
-                onclick: safe(async () => {
-                  const nextMembers = hasAccess
-                    ? t.members.filter((m) => m !== u.username)
-                    : [...t.members, u.username];
-                  const res = await api('PATCH', `/api/admin/tenants/${t.slug}`, { members: nextMembers });
-                  applyAdminResp(res);
-                }),
-              },
-              h('span', { class: 'pic-name' }, u.username),
-              hasAccess && h('span', { class: 'pic-chk' }, '✓'));
-            })));
-      }));
+            return h('div', { class: 'data-row' },
+              h('div', { class: 'data-main' },
+                h('div', { class: 'data-title' }, h('span', {}, t.name)),
+                h('div', { class: 'data-sub' }, metaParts.join(' · '))),
+              h('div', { class: 'data-actions' },
+                h('button', {
+                  type: 'button', class: 'btn xs primary',
+                  onclick: () => switchTenant(t.slug, true, 'timeline'),
+                }, 'Buka'),
+                h('button', {
+                  type: 'button', class: 'btn xs',
+                  onclick: () => projectCrudDialog(t),
+                }, 'Edit'),
+                overview.tenants.length > 1 && h('button', {
+                  type: 'button', class: 'btn xs danger',
+                  onclick: safe(async () => {
+                    if (!confirm(`Hapus project "${t.name}"?`)) return;
+                    const res = await api('DELETE', `/api/admin/tenants/${t.slug}`);
+                    applyAdminResp(res, `Project "${t.name}" dihapus`);
+                  }),
+                }, 'Hapus')));
+          }))
+      : h('div', { class: 'empty', style: { padding: '20px 10px' } }, 'Project tidak ditemukan.');
 
-    // 2. KOLOM KANAN: USER
-    const uNameIn = h('input', { placeholder: 'Username', required: true, maxlength: 60 });
-    const uPassIn = h('input', { type: 'password', placeholder: 'Password', required: true, maxlength: 100 });
-    const uRoleIn = h('select', {},
-      h('option', { value: 'user' }, 'User'),
-      h('option', { value: 'superadmin' }, 'Admin'));
+    const projPager = filteredProjects.length > ADMIN_PAGE_SIZE && h('div', { class: 'pager' },
+      h('span', {}, `${projStart + 1}–${Math.min(filteredProjects.length, projStart + ADMIN_PAGE_SIZE)} dari ${filteredProjects.length}`),
+      h('div', { class: 'pager-btns' },
+        h('button', {
+          type: 'button', class: 'btn xs', disabled: ui.projPage <= 1,
+          onclick: () => { ui.projPage--; render(); },
+        }, '←'),
+        h('span', {}, `${ui.projPage} / ${totalProjPages}`),
+        h('button', {
+          type: 'button', class: 'btn xs', disabled: ui.projPage >= totalProjPages,
+          onclick: () => { ui.projPage++; render(); },
+        }, '→')));
 
-    const selProjects = new Set(overview.tenants.map((t) => t.slug));
-    const projectPillsWrap = h('div', { class: 'pic-pills-wrap' });
-    const renderNewUserProjects = () => {
-      projectPillsWrap.replaceChildren(
-        ...overview.tenants.map((t) => {
-          const on = selProjects.has(t.slug);
-          return h('button', {
-            type: 'button',
-            class: 'pic-pill' + (on ? ' is-active' : ''),
-            onclick: () => {
-              if (on) selProjects.delete(t.slug);
-              else selProjects.add(t.slug);
-              renderNewUserProjects();
-            },
-          },
-          h('span', { class: 'pic-name' }, t.name),
-          on && h('span', { class: 'pic-chk' }, '✓'));
-        }),
-      );
-    };
-    renderNewUserProjects();
+    // 2. KOLOM USER (Search + Compact List + Pagination + Modal CRUD)
+    const uq = (ui.userQ || '').trim().toLowerCase();
+    const filteredUsers = overview.users.filter((u) =>
+      !uq || u.username.toLowerCase().includes(uq) || u.role.toLowerCase().includes(uq));
+    const totalUserPages = Math.max(1, Math.ceil(filteredUsers.length / ADMIN_PAGE_SIZE));
+    if (ui.userPage > totalUserPages) ui.userPage = totalUserPages;
+    const userStart = (ui.userPage - 1) * ADMIN_PAGE_SIZE;
+    const pagedUsers = filteredUsers.slice(userStart, userStart + ADMIN_PAGE_SIZE);
 
-    const addUserForm = h('form', {
-      class: 'admin-box',
-      onsubmit: safe(async (e) => {
-        e.preventDefault();
-        const res = await api('POST', '/api/admin/users', {
-          username: uNameIn.value.trim(),
-          password: uPassIn.value.trim(),
-          role: uRoleIn.value,
-          tenants: Array.from(selProjects),
-        });
-        applyAdminResp(res, 'User ditambahkan');
-      }),
-    },
-    h('div', { class: 'admin-row-3' }, uNameIn, uPassIn, uRoleIn),
-    projectPillsWrap,
-    h('div', { style: { display: 'flex', justifyContent: 'flex-end' } },
-      h('button', { type: 'submit', class: 'btn primary small' }, 'Tambah User')));
+    const userSearchIn = h('input', {
+      type: 'search',
+      placeholder: 'Cari user…',
+      value: ui.userQ,
+      oninput: (e) => {
+        ui.userQ = e.target.value;
+        ui.userPage = 1;
+        const pos = e.target.selectionStart;
+        render();
+        const el = document.getElementById('admin-user-search');
+        if (el) { el.focus(); el.setSelectionRange(pos, pos); }
+      },
+      id: 'admin-user-search',
+    });
 
-    const userList = h('div', { class: 'admin-list' },
-      overview.users.map((u) => {
-        const isEnvRoot = Boolean(u.isEnvSuperAdmin);
-        const isSuperUser = u.role === 'superadmin' || isEnvRoot;
-        return h('div', { class: 'admin-card' },
-          h('div', { class: 'admin-card-top' },
-            h('div', { class: 'admin-card-title' },
-              h('span', {}, u.username),
-              badge(isEnvRoot ? 'Super Admin (Env)' : (isSuperUser ? 'Admin' : 'User'), isSuperUser ? 'st-active' : '')),
-            !isEnvRoot && h('div', { style: { display: 'flex', gap: '4px', flexWrap: 'wrap' } },
-              h('button', {
-                type: 'button',
-                class: 'btn xs',
-                onclick: safe(async () => {
-                  const nextRole = isSuperUser ? 'user' : 'superadmin';
-                  const res = await api('POST', '/api/admin/users', {
-                    username: u.username,
-                    role: nextRole,
-                    tenants: u.tenants,
-                  });
-                  applyAdminResp(res, `Role "${u.username}" diubah ke ${nextRole === 'superadmin' ? 'Admin' : 'User'}`);
-                }),
-              }, isSuperUser ? 'Set User' : 'Set Admin'),
-              h('button', {
-                type: 'button', class: 'btn xs',
-                onclick: safe(async () => {
-                  const nextPass = prompt(`Password baru untuk "${u.username}":`);
-                  if (nextPass === null || !nextPass.trim()) return;
-                  const res = await api('POST', '/api/admin/users', {
-                    username: u.username,
-                    password: nextPass.trim(),
-                    role: u.role,
-                    tenants: u.tenants,
-                  });
-                  applyAdminResp(res, 'Password diperbarui');
-                }),
-              }, 'Password'),
-              u.username !== me && h('button', {
-                type: 'button', class: 'btn xs danger',
-                onclick: safe(async () => {
-                  if (!confirm(`Hapus user "${u.username}"?`)) return;
-                  const res = await api('DELETE', `/api/admin/users/${u.username}`);
-                  applyAdminResp(res, `User "${u.username}" dihapus`);
-                }),
-              }, 'Hapus'))),
-          !isSuperUser && h('div', { class: 'pic-pills-wrap' },
-            overview.tenants.map((t) => {
-              const has = u.tenants.includes(t.slug);
-              return h('button', {
-                type: 'button',
-                class: 'pic-pill' + (has ? ' is-active' : ''),
-                onclick: safe(async () => {
-                  const nextTenants = has
-                    ? u.tenants.filter((s) => s !== t.slug)
-                    : [...u.tenants, t.slug];
-                  const res = await api('POST', '/api/admin/users', {
-                    username: u.username,
-                    role: u.role,
-                    tenants: nextTenants,
-                  });
-                  applyAdminResp(res);
-                }),
-              },
-              h('span', { class: 'pic-name' }, t.name),
-              has && h('span', { class: 'pic-chk' }, '✓'));
-            })));
-      }));
+    const userRows = pagedUsers.length
+      ? h('div', { class: 'data-list' },
+          pagedUsers.map((u) => {
+            const isEnvRoot = Boolean(u.isEnvSuperAdmin);
+            const isSuperUser = u.role === 'superadmin' || isEnvRoot;
+            const subText = isSuperUser
+              ? 'Akses semua project'
+              : `${u.tenants.length} project`;
+
+            return h('div', { class: 'data-row' },
+              h('div', { class: 'data-main' },
+                h('div', { class: 'data-title' },
+                  h('span', {}, u.username),
+                  badge(isEnvRoot ? 'Super Admin (Env)' : (isSuperUser ? 'Admin' : 'User'), isSuperUser ? 'st-active' : '')),
+                h('div', { class: 'data-sub' }, subText)),
+              !isEnvRoot && h('div', { class: 'data-actions' },
+                h('button', {
+                  type: 'button', class: 'btn xs',
+                  onclick: () => userCrudDialog(u),
+                }, 'Edit'),
+                u.username !== me && h('button', {
+                  type: 'button', class: 'btn xs danger',
+                  onclick: safe(async () => {
+                    if (!confirm(`Hapus user "${u.username}"?`)) return;
+                    const res = await api('DELETE', `/api/admin/users/${u.username}`);
+                    applyAdminResp(res, `User "${u.username}" dihapus`);
+                  }),
+                }, 'Hapus')));
+          }))
+      : h('div', { class: 'empty', style: { padding: '20px 10px' } }, 'User tidak ditemukan.');
+
+    const userPager = filteredUsers.length > ADMIN_PAGE_SIZE && h('div', { class: 'pager' },
+      h('span', {}, `${userStart + 1}–${Math.min(filteredUsers.length, userStart + ADMIN_PAGE_SIZE)} dari ${filteredUsers.length}`),
+      h('div', { class: 'pager-btns' },
+        h('button', {
+          type: 'button', class: 'btn xs', disabled: ui.userPage <= 1,
+          onclick: () => { ui.userPage--; render(); },
+        }, '←'),
+        h('span', {}, `${ui.userPage} / ${totalUserPages}`),
+        h('button', {
+          type: 'button', class: 'btn xs', disabled: ui.userPage >= totalUserPages,
+          onclick: () => { ui.userPage++; render(); },
+        }, '→')));
 
     return h('div', { class: 'admin-grid' },
       h('section', { class: 'panel admin-panel' },
         h('div', { class: 'admin-panel-head' },
-          h('h3', {}, `Project (${overview.tenants.length})`)),
-        createProjectForm,
-        projectList),
+          h('h3', {}, `Project (${overview.tenants.length})`),
+          h('button', { type: 'button', class: 'btn primary small', onclick: () => projectCrudDialog(null) }, '+ Project')),
+        h('div', { class: 'admin-toolbar' }, projSearchIn),
+        projectRows,
+        projPager),
       h('section', { class: 'panel admin-panel' },
         h('div', { class: 'admin-panel-head' },
-          h('h3', {}, `User (${overview.users.length})`)),
-        addUserForm,
-        userList));
+          h('h3', {}, `User (${overview.users.length})`),
+          h('button', { type: 'button', class: 'btn primary small', onclick: () => userCrudDialog(null) }, '+ User')),
+        h('div', { class: 'admin-toolbar' }, userSearchIn),
+        userRows,
+        userPager));
+  }
+
+  function projectInfoBar() {
+    const t = S.tenant;
+    if (!t) return null;
+    const desc = (t.desc || S.projectDesc || '').trim();
+    const links = Array.isArray(t.links) && t.links.length ? t.links : (S.projectLinks || []);
+    const isSuper = Boolean(S.me && S.me.isSuperAdmin);
+    if (!desc && !links.length && !isSuper) return null;
+
+    return h('section', { class: 'panel proj-info-bar' },
+      h('div', { class: 'proj-info-main' },
+        h('div', { class: 'proj-info-title' },
+          h('span', {}, t.name),
+          !desc && !links.length && h('span', { class: 'muted small', style: { fontWeight: '400' } }, 'Belum ada deskripsi atau link dokumentasi project.')),
+        desc && h('div', { class: 'proj-info-desc' }, renderLinkedText(desc))),
+      h('div', { class: 'proj-info-links' },
+        links.map((l) => h('div', { class: 'link-card' },
+          h('a', { href: l.url, target: '_blank', rel: 'noopener noreferrer' }, `${l.title} ↗`))),
+        isSuper && h('button', {
+          type: 'button',
+          class: 'btn xs',
+          onclick: async () => {
+            if (!ui.adminOverview) {
+              try { ui.adminOverview = await api('GET', '/api/admin/overview'); } catch (_) { /* abaikan */ }
+            }
+            const found = (ui.adminOverview && ui.adminOverview.tenants || []).find((x) => x.slug === t.slug) || {
+              slug: t.slug,
+              name: t.name,
+              desc,
+              links,
+              members: (S.me && S.me.users) || [],
+            };
+            projectCrudDialog(found);
+          },
+        }, 'Edit Info Project')));
   }
 
   function phaseDialog(p) {
@@ -2018,6 +2257,7 @@
     const pct = totalTasks ? Math.round((doneTasks / totalTasks) * 100) : 0;
 
     return h('div', { class: 'wrap' },
+      projectInfoBar(),
       h('section', { class: 'panel chart-panel' },
         h('div', { class: 'chart-toolbar' },
           h('div', { class: 'chart-title-group' },
@@ -2157,8 +2397,10 @@
         h('button', { class: 'btn primary small', onclick: () => phaseDialog() }, '+ Buat Phase'));
     }
     const ph = ps.find((p) => p.id === ui.phaseId) || currentPhase();
-    return h('div', {},
-      h('div', { class: 'toolbar' },
+    return h('div', { class: 'wrap' },
+      projectInfoBar(),
+      h('div', {},
+        h('div', { class: 'toolbar' },
         h('select', {
           'aria-label': 'Pilih phase',
           onchange: (e) => { ui.phaseId = e.target.value; store.set('phaseId', ui.phaseId); render(); },
@@ -2173,7 +2415,7 @@
         ph.locked
           ? h('button', { class: 'btn small', onclick: () => crDialog(ph.id) }, '+ Change Request')
           : h('button', { class: 'btn primary small', onclick: () => taskDialog(ph) }, '+ Task')),
-      h('div', { class: 'board' }, STATUSES.map((s) => column(ph, s))));
+      h('div', { class: 'board' }, STATUSES.map((s) => column(ph, s)))));
   }
 
   /* ======================= RENDER & INIT ======================= */

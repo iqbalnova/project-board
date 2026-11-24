@@ -183,7 +183,15 @@ function normalize(d) {
       by: typeof l.by === 'string' ? l.by : '',
       taskId: typeof l.taskId === 'string' ? l.taskId : null,
     }));
-  return { rev: Number.isInteger(d.rev) ? d.rev : 1, phases, tasks, changes, log };
+  const projectDesc = str(d.projectDesc, 2000);
+  const projectLinks = Array.isArray(d.projectLinks)
+    ? d.projectLinks.filter((l) => l && str(l.url, 1000)).slice(0, 20).map((l) => ({
+        id: String(l.id || uid()),
+        title: str(l.title, 120) || str(l.url, 120),
+        url: str(l.url, 1000),
+      }))
+    : [];
+  return { rev: Number.isInteger(d.rev) ? d.rev : 1, projectDesc, projectLinks, phases, tasks, changes, log };
 }
 
 const RESERVED_SLUGS = new Set(['api', 'card', 'kanban', 'timeline', 'healthz', 'login', 'logout', 'admin']);
@@ -686,6 +694,15 @@ const routes = [];
 const route = (method, pattern, fn) =>
   routes.push({ method, re: new RegExp('^' + pattern.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), fn });
 
+function normalizeProjectLinks(rawLinks) {
+  if (!Array.isArray(rawLinks)) return [];
+  return rawLinks.filter((l) => l && str(l.url, 1000)).slice(0, 20).map((l) => ({
+    id: String(l.id || uid()),
+    title: str(l.title, 120) || str(l.url, 120),
+    url: str(l.url, 1000),
+  }));
+}
+
 const stateWithMeta = (user, tenantSlug = activeTenantSlug) => {
   const allowed = allowedTenantsFor(user);
   let t = store.tenants[tenantSlug];
@@ -699,8 +716,18 @@ const stateWithMeta = (user, tenantSlug = activeTenantSlug) => {
 
   return {
     ...board,
-    tenant: t ? { slug: t.slug, name: t.name } : { slug: 'main', name: 'Project Utama' },
-    tenants: allowed.map((x) => ({ slug: x.slug, name: x.name })),
+    tenant: t ? {
+      slug: t.slug,
+      name: t.name,
+      desc: board.projectDesc || '',
+      links: board.projectLinks || [],
+    } : { slug: 'main', name: 'Project Utama', desc: '', links: [] },
+    tenants: allowed.map((x) => ({
+      slug: x.slug,
+      name: x.name,
+      desc: (x.board && x.board.projectDesc) || '',
+      links: (x.board && x.board.projectLinks) || [],
+    })),
     storage: pgReady ? 'postgresql' : 'local-file',
     me: {
       user,
@@ -733,6 +760,8 @@ function buildAdminOverview() {
     tenants: Object.values(store.tenants).map((t) => ({
       slug: t.slug,
       name: t.name,
+      desc: (t.board && t.board.projectDesc) || '',
+      links: (t.board && t.board.projectLinks) || [],
       createdAt: t.createdAt,
       phasesCount: (t.board.phases || []).length,
       tasksCount: (t.board.tasks || []).length,
@@ -769,6 +798,8 @@ route('POST', '/api/admin/tenants', ({ body, user }) => {
   const slug = generateUniqueSlug(name);
 
   const newBoard = seed();
+  newBoard.projectDesc = str(body.desc, 2000);
+  newBoard.projectLinks = normalizeProjectLinks(body.links);
   newBoard.log = [{ ts: now(), text: `Project "${name}" dibuat (oleh ${user})`, by: user, taskId: null }];
 
   store.tenants[slug] = {
@@ -803,6 +834,12 @@ route('PATCH', '/api/admin/tenants/:slug', ({ params, body, user }) => {
     if (!name) throw bad('Nama project tidak boleh kosong');
     t.name = name;
   }
+  if (body.desc !== undefined) {
+    t.board.projectDesc = str(body.desc, 2000);
+  }
+  if (body.links !== undefined) {
+    t.board.projectLinks = normalizeProjectLinks(body.links);
+  }
   if (Array.isArray(body.members)) {
     const memberSet = new Set(body.members.map((m) => str(m, 60)).filter(Boolean));
     for (const u of Object.values(store.users)) {
@@ -815,6 +852,7 @@ route('PATCH', '/api/admin/tenants/:slug', ({ params, body, user }) => {
       u.tenants = Array.from(cur);
     }
   }
+  t.board.rev = (t.board.rev || 1) + 1;
   saveMetaAndTenant(t.slug);
   return {
     overview: buildAdminOverview(),
