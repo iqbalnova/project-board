@@ -3,10 +3,12 @@ FROM node:22-alpine
 ENV NODE_ENV=production \
     PORT=3000 \
     DATA_DIR=/data \
-    NODE_OPTIONS=--max-old-space-size=96
+    NODE_OPTIONS=--max-old-space-size=128
 
 WORKDIR /app
-COPY package.json server.js index.html app.js style.css ./
+COPY package*.json ./
+RUN npm install --omit=dev --no-audit --no-fund
+COPY server.js index.html app.js style.css ./
 
 RUN mkdir -p /data && chown -R node:node /data /app
 USER node

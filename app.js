@@ -19,11 +19,22 @@
 
   function parseRouteFromPath() {
     const p = window.location.pathname;
-    const cm = p.match(/^\/(?:kanban\/)?card\/([a-zA-Z0-9_-]+)\/?$/);
-    if (cm) return { view: 'kanban', cardId: cm[1] };
-    if (/^\/kanban\/?$/.test(p)) return { view: 'kanban', cardId: null };
-    if (/^\/timeline\/?$/.test(p)) return { view: 'timeline', cardId: null };
-    return { view: null, cardId: null };
+    const legacyCard = p.match(/^\/(?:kanban\/)?card\/([a-zA-Z0-9_-]+)\/?$/);
+    if (legacyCard) return { tenant: null, view: 'kanban', cardId: legacyCard[1] };
+    if (/^\/kanban\/?$/.test(p)) return { tenant: null, view: 'kanban', cardId: null };
+    if (/^\/timeline\/?$/.test(p)) return { tenant: null, view: 'timeline', cardId: null };
+
+    const tm = p.match(/^\/([a-zA-Z0-9_-]+)(?:\/(timeline|kanban|(?:kanban\/)?card\/([a-zA-Z0-9_-]+)))?\/?$/);
+    if (tm) {
+      const tenant = tm[1].toLowerCase();
+      const sub = tm[2] || '';
+      const cardId = tm[3] || null;
+      if (cardId) return { tenant, view: 'kanban', cardId };
+      if (sub === 'kanban') return { tenant, view: 'kanban', cardId: null };
+      if (sub === 'timeline') return { tenant, view: 'timeline', cardId: null };
+      return { tenant, view: null, cardId: null };
+    }
+    return { tenant: null, view: null, cardId: null };
   }
 
   function parseCardIdFromPath() {
@@ -31,8 +42,15 @@
   }
 
   const initRoute = parseRouteFromPath();
-  let S = { rev: 0, phases: [], tasks: [], changes: [], log: [], me: { user: 'admin', authRequired: false, users: ['admin'] } };
+  let S = {
+    rev: 0, phases: [], tasks: [], changes: [], log: [],
+    tenant: { slug: 'main', name: 'Project Utama' },
+    tenants: [{ slug: 'main', name: 'Project Utama' }],
+    storage: 'local-file',
+    me: { user: 'admin', role: 'superadmin', isSuperAdmin: true, authRequired: false, users: ['admin'] },
+  };
   const ui = {
+    tenant: initRoute.tenant || store.get('tenant') || 'main',
     view: initRoute.view || (store.get('view') === 'kanban' ? 'kanban' : 'timeline'),
     phaseId: store.get('phaseId'),
     q: '',
@@ -106,19 +124,36 @@
   function updateUserButton() {
     const btn = document.getElementById('btn-user');
     const btnReset = document.getElementById('btn-reset');
+    const btnTenants = document.getElementById('btn-tenants');
+    const tenantSelect = document.getElementById('tenant-select');
     const u = (S.me && S.me.user) || '';
-    const isAdmin = u === 'admin';
+    const isSuper = Boolean((S.me && S.me.isSuperAdmin) || u === 'admin');
 
     if (btn) {
       if (ui.needLogin) {
         btn.textContent = 'Login';
       } else {
-        btn.textContent = u || 'admin';
+        btn.textContent = (u || 'admin') + (isSuper ? ' ★' : '');
       }
     }
 
     if (btnReset) {
-      btnReset.style.display = (!ui.needLogin && isAdmin) ? '' : 'none';
+      btnReset.style.display = (!ui.needLogin && isSuper) ? '' : 'none';
+    }
+    if (btnTenants) {
+      btnTenants.hidden = ui.needLogin || !isSuper;
+    }
+    if (tenantSelect) {
+      const list = Array.isArray(S.tenants) ? S.tenants : [];
+      const curSlug = (S.tenant && S.tenant.slug) || ui.tenant || 'main';
+      if (ui.needLogin || !list.length) {
+        tenantSelect.hidden = true;
+      } else {
+        tenantSelect.hidden = false;
+        tenantSelect.replaceChildren(
+          ...list.map((t) => h('option', { value: t.slug, selected: t.slug === curSlug }, `📁 ${t.name}`)),
+        );
+      }
     }
   }
 
@@ -230,8 +265,16 @@
   }
 
   /* ======================= API ======================= */
+  function syncTenantFromState(d) {
+    if (d && d.tenant && d.tenant.slug) {
+      ui.tenant = d.tenant.slug;
+      store.set('tenant', ui.tenant);
+    }
+  }
+
   async function api(method, url, body) {
-    const opt = { method, headers: {} };
+    const activeSlug = ui.tenant || (S.tenant && S.tenant.slug) || 'main';
+    const opt = { method, headers: { 'X-Tenant': activeSlug } };
     if (method !== 'GET') { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body ?? {}); }
     const res = await fetch(url, opt);
     let data = null;
@@ -249,6 +292,7 @@
     const vp = document.querySelector('.g-viewport');
     if (vp) ui.scrollLeft = vp.scrollLeft;
     S = await api(method, url, body);
+    syncTenantFromState(S);
     if (S.log && S.log[0]) ui.lastSeenLogTs = S.log[0].ts;
     ui.needLogin = false;
     render();
@@ -268,10 +312,26 @@
     const vp = document.querySelector('.g-viewport');
     if (vp) ui.scrollLeft = vp.scrollLeft;
     S = await api('GET', '/api/state');
+    syncTenantFromState(S);
     if (S.log && S.log[0]) ui.lastSeenLogTs = S.log[0].ts;
     ui.needLogin = false;
     render();
     if (showMsg) toast('Data diperbarui');
+  });
+
+  const switchTenant = safe(async (newSlug, pushHistory = true) => {
+    if (!newSlug) return;
+    ui.tenant = newSlug;
+    store.set('tenant', newSlug);
+    ui.drawerTaskId = null;
+    ui.phaseId = null;
+    S = await api('GET', '/api/state');
+    syncTenantFromState(S);
+    if (S.log && S.log[0]) ui.lastSeenLogTs = S.log[0].ts;
+    ui.unreadLogs = 0;
+    syncUrlWithDrawer(null, !pushHistory);
+    render();
+    if (S.tenant) toast(`Project aktif: ${S.tenant.name}`);
   });
 
   function updateLogBadge() {
@@ -343,6 +403,7 @@
         btn.disabled = true;
         try {
           S = await api('POST', '/api/login', { username: uIn.value.trim(), password: pIn.value });
+          syncTenantFromState(S);
           if (S.log && S.log[0]) ui.lastSeenLogTs = S.log[0].ts;
           ui.needLogin = false;
           applyRouteCardIfNeeded();
@@ -383,6 +444,7 @@
         err.hidden = true;
         try {
           S = await api('POST', '/api/login', { username: uIn.value.trim(), password: pIn.value });
+          syncTenantFromState(S);
           ui.needLogin = false;
           dlg.close();
           render();
@@ -461,15 +523,20 @@
     toast(`${p.name} dihapus`);
   });
 
-  /* ======================= SIDE-PEEK DETAIL SHEET & DEEP-LINK (/timeline, /kanban, /card/:id) ======================= */
+  /* ======================= SIDE-PEEK DETAIL SHEET & DEEP-LINK (/<tenant>/timeline, /<tenant>/kanban, /<tenant>/card/:id) ======================= */
+  function currentTenantSlug() {
+    return (S.tenant && S.tenant.slug) || ui.tenant || 'main';
+  }
+
   function syncUrlWithDrawer(taskId, replace = false) {
     try {
+      const slug = currentTenantSlug();
       const wantPath = taskId
-        ? `/card/${taskId}`
-        : (ui.view === 'kanban' ? '/kanban' : '/timeline');
+        ? `/${slug}/card/${taskId}`
+        : `/${slug}/${ui.view === 'kanban' ? 'kanban' : 'timeline'}`;
       if (window.location.pathname === wantPath) return;
-      if (replace) window.history.replaceState({ view: ui.view, cardId: taskId || null }, '', wantPath);
-      else window.history.pushState({ view: ui.view, cardId: taskId || null }, '', wantPath);
+      if (replace) window.history.replaceState({ tenant: slug, view: ui.view, cardId: taskId || null }, '', wantPath);
+      else window.history.pushState({ tenant: slug, view: ui.view, cardId: taskId || null }, '', wantPath);
     } catch (_) { /* abaikan jika history API dibatasi */ }
   }
 
@@ -507,12 +574,13 @@
     } else {
       ui.drawerTaskId = null;
       syncUrlWithDrawer(null, true);
-      setTimeout(() => toast(`Card #${cid} tidak ditemukan`, true), 80);
+      setTimeout(() => toast(`Card #${cid} tidak ditemukan di project ini`, true), 80);
     }
   }
 
   async function copyCardLink(t) {
-    const url = `${window.location.origin}/card/${t.id}`;
+    const slug = currentTenantSlug();
+    const url = `${window.location.origin}/${slug}/card/${t.id}`;
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         await navigator.clipboard.writeText(url);
@@ -524,7 +592,7 @@
         document.execCommand('copy');
         ta.remove();
       }
-      toast(`Link card disalin: /card/${t.id}`);
+      toast(`Link card disalin: /${slug}/card/${t.id}`);
     } catch (_) {
       toast(`URL: ${url}`);
     }
@@ -918,10 +986,12 @@
 
   function resetDialog() {
     const me = (S.me && S.me.user) || '';
-    if (me !== 'admin') {
-      return toast('Akses ditolak: Hanya akun admin yang dapat melakukan Clear DB', true);
+    const isSuper = Boolean((S.me && S.me.isSuperAdmin) || me === 'admin');
+    if (!isSuper) {
+      return toast('Akses ditolak: Hanya Super Admin yang dapat melakukan Clear DB', true);
     }
     const dlg = $('#dlg');
+    const tName = (S.tenant && S.tenant.name) || 'Project ini';
     const doReset = safe(async (mode, msg) => {
       closeTaskDrawer();
       await mutate('POST', '/api/reset', { mode });
@@ -935,10 +1005,10 @@
           h('h2', { style: { color: 'var(--bad)', display: 'flex', alignItems: 'center', gap: '8px' } },
             '⚠️ Konfirmasi: ' + actionTitle),
           h('p', { class: 'intro', style: { color: 'var(--text)' } },
-            'Tindakan ini memerlukan konfirmasi keamanan admin.'),
+            `Target Project: ${tName}. Tindakan ini memerlukan konfirmasi keamanan Super Admin.`),
           h('div', { class: 'form-err', style: { margin: '14px 0', lineHeight: '1.5' } },
             h('strong', {}, warningMsg),
-            h('div', { class: 'small', style: { marginTop: '4px' } }, 'Semua data aktif yang dihapus tidak dapat dipulihkan secara otomatis.')),
+            h('div', { class: 'small', style: { marginTop: '4px' } }, 'Project/Tenant lain tidak akan terpengaruh.')),
           h('div', { class: 'actions' },
             h('button', { type: 'button', class: 'btn', onclick: () => resetDialog() }, 'Batal'),
             h('button', {
@@ -950,29 +1020,359 @@
 
     dlg.replaceChildren(
       h('div', { class: 'dlg-in' },
-        h('h2', {}, 'Clear Database (Khusus Admin)'),
-        h('p', { class: 'intro' }, 'Pilih mode pembersihan data. File backup (.bak) tetap tersimpan otomatis di server.'),
+        h('h2', {}, `Clear Database · ${tName}`),
+        h('p', { class: 'intro' }, `Pilih mode pembersihan untuk project "${tName}". Project/Tenant lain tetap aman.`),
         h('div', { class: 'reset-cards' },
           h('div', { class: 'reset-card' },
             h('div', {},
               h('h4', {}, 'Kosongkan Semua (0 Phase)'),
-              h('p', {}, 'Hapus seluruh phase, task, change request, dan riwayat.')),
+              h('p', {}, 'Hapus seluruh phase, task, change request, dan riwayat di project ini.')),
             h('button', {
               class: 'btn danger small',
-              onclick: () => confirmAction('empty', 'Kosongkan Database', 'PERINGATAN: Seluruh phase, ticket/card, komentar, dan riwayat akan dihapus total (0 item)!', 'Ya, Kosongkan Database'),
+              onclick: () => confirmAction('empty', 'Kosongkan Project', `PERINGATAN: Seluruh phase, ticket/card, komentar, dan riwayat pada "${tName}" akan dihapus total (0 item)!`, 'Ya, Kosongkan Project Ini'),
             }, 'Kosongkan…')),
           h('div', { class: 'reset-card' },
             h('div', {},
               h('h4', {}, 'Reset ke Awal (Phase 1)'),
-              h('p', {}, 'Hapus data lama dan buat Phase 1 baru mulai hari ini.')),
+              h('p', {}, 'Hapus data lama di project ini dan buat Phase 1 baru mulai hari ini.')),
             h('button', {
               class: 'btn primary small',
-              onclick: () => confirmAction('seed', 'Reset ke Phase 1', 'Data lama akan digantikan dengan template default Phase 1.', 'Ya, Reset ke Phase 1'),
+              onclick: () => confirmAction('seed', 'Reset ke Phase 1', `Data lama pada "${tName}" akan digantikan dengan template default Phase 1.`, 'Ya, Reset ke Phase 1'),
             }, 'Reset Phase 1…'))),
         h('div', { class: 'actions' },
           h('button', { class: 'btn', onclick: () => dlg.close() }, 'Batal'))));
     dlg.showModal();
   }
+
+  /* ======================= SUPER ADMIN: KELOLA TENANT & USER ======================= */
+  const tenantAdminDialog = safe(async (initialTab = 'tenants') => {
+    const me = (S.me && S.me.user) || '';
+    const isSuper = Boolean((S.me && S.me.isSuperAdmin) || me === 'admin');
+    if (!isSuper) return toast('Hanya Super Admin yang dapat mengelola Tenant & User', true);
+
+    const dlg = $('#dlg');
+    let activeTab = initialTab;
+    let overview = await api('GET', '/api/admin/overview');
+
+    const slugifyLocal = (s) => String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+
+    function renderAdminModal() {
+      const curSlug = currentTenantSlug();
+      const storageBadge = badge(
+        overview.storage === 'postgresql' ? '🗄️ PostgreSQL (Sakala DB Aktif)' : '📁 Local File Storage',
+        overview.storage === 'postgresql' ? 'st-done' : 'st-active',
+      );
+
+      const tabBar = h('div', { class: 'admin-tabs' },
+        h('button', {
+          type: 'button',
+          class: 'btn small ' + (activeTab === 'tenants' ? 'primary' : 'ghost'),
+          onclick: () => { activeTab = 'tenants'; renderAdminModal(); },
+        }, `📁 Daftar Project / Tenant (${overview.tenants.length})`),
+        h('button', {
+          type: 'button',
+          class: 'btn small ' + (activeTab === 'users' ? 'primary' : 'ghost'),
+          onclick: () => { activeTab = 'users'; renderAdminModal(); },
+        }, `👥 Kelola Akun User & Akses (${overview.users.length})`));
+
+      let bodyContent;
+
+      if (activeTab === 'tenants') {
+        const tenantList = h('div', { class: 'admin-list' },
+          overview.tenants.map((t) => {
+            const isCur = t.slug === curSlug;
+            const regularUsers = overview.users.filter((u) => u.role !== 'superadmin');
+            return h('div', { class: 'admin-card' + (isCur ? ' is-current' : '') },
+              h('div', { class: 'admin-card-top' },
+                h('div', { class: 'admin-card-title' },
+                  h('span', {}, `📁 ${t.name}`),
+                  h('span', { class: 'card-id-pill', title: `URL: /${t.slug}/timeline` }, `/${t.slug}`),
+                  isCur && badge('Sedang Dibuka', 'st-active'),
+                  badge(`${t.phasesCount} Phase · ${t.doneCount}/${t.tasksCount} Task`, '')),
+                h('div', { style: { display: 'flex', gap: '5px' } },
+                  !isCur && h('button', {
+                    type: 'button', class: 'btn xs primary',
+                    onclick: async () => {
+                      dlg.close();
+                      await switchTenant(t.slug);
+                    },
+                  }, 'Buka Project →'),
+                  h('button', {
+                    type: 'button', class: 'btn xs',
+                    onclick: safe(async () => {
+                      const nextName = prompt('Ubah nama Project / Tenant:', t.name);
+                      if (!nextName || !nextName.trim() || nextName.trim() === t.name) return;
+                      const res = await api('PATCH', `/api/admin/tenants/${t.slug}`, { name: nextName.trim() });
+                      overview = res.overview;
+                      S = res.state;
+                      render();
+                      renderAdminModal();
+                      toast('Nama project diperbarui');
+                    }),
+                  }, 'Ubah Nama'),
+                  overview.tenants.length > 1 && h('button', {
+                    type: 'button', class: 'btn xs danger',
+                    onclick: safe(async () => {
+                      if (!confirm(`Hapus project "${t.name}" (/${t.slug}) beserta seluruh phase dan task di dalamnya?`)) return;
+                      const res = await api('DELETE', `/api/admin/tenants/${t.slug}`);
+                      overview = res.overview;
+                      S = res.state;
+                      syncTenantFromState(S);
+                      syncUrlWithDrawer(null, true);
+                      render();
+                      renderAdminModal();
+                      toast(`Project "${t.name}" dihapus`);
+                    }),
+                  }, 'Hapus'))),
+              regularUsers.length > 0 && h('div', { style: { display: 'grid', gap: '4px' } },
+                h('span', { class: 'prop-hdr' }, 'Akses Anggota Tim (Klik untuk izinkan / cabut akses ke project ini):'),
+                h('div', { class: 'pic-pills-wrap' },
+                  regularUsers.map((u) => {
+                    const hasAccess = t.members.includes(u.username);
+                    return h('button', {
+                      type: 'button',
+                      class: 'pic-pill' + (hasAccess ? ' is-active' : ''),
+                      onclick: safe(async () => {
+                        const nextMembers = hasAccess
+                          ? t.members.filter((m) => m !== u.username)
+                          : [...t.members, u.username];
+                        const res = await api('PATCH', `/api/admin/tenants/${t.slug}`, { members: nextMembers });
+                        overview = res.overview;
+                        S = res.state;
+                        render();
+                        renderAdminModal();
+                      }),
+                    },
+                    h('span', { class: 'pic-avatar' }, initials(u.username)),
+                    h('span', { class: 'pic-name' }, u.username),
+                    hasAccess && h('span', { class: 'pic-chk' }, '✓'));
+                  }))));
+          }));
+
+        // Form tambah tenant baru
+        const nameIn = h('input', { placeholder: 'Nama Project (mis: Sakala Mobile / ERP Gmedia)', required: true, maxlength: 80 });
+        const slugIn = h('input', { placeholder: 'Slug URL (mis: sakala-mobile)', required: true, maxlength: 40 });
+        let slugTouched = false;
+        nameIn.addEventListener('input', () => {
+          if (!slugTouched) slugIn.value = slugifyLocal(nameIn.value);
+        });
+        slugIn.addEventListener('input', () => { slugTouched = true; slugIn.value = slugifyLocal(slugIn.value); });
+
+        const selectedMembers = new Set(overview.users.map((u) => u.username));
+        const memberPillsWrap = h('div', { class: 'pic-pills-wrap' });
+        const renderNewTenantMembers = () => {
+          memberPillsWrap.replaceChildren(
+            ...overview.users.filter((u) => u.role !== 'superadmin').map((u) => {
+              const on = selectedMembers.has(u.username);
+              return h('button', {
+                type: 'button',
+                class: 'pic-pill' + (on ? ' is-active' : ''),
+                onclick: () => {
+                  if (on) selectedMembers.delete(u.username);
+                  else selectedMembers.add(u.username);
+                  renderNewTenantMembers();
+                },
+              },
+              h('span', { class: 'pic-avatar' }, initials(u.username)),
+              h('span', { class: 'pic-name' }, u.username),
+              on && h('span', { class: 'pic-chk' }, '✓'));
+            }),
+          );
+        };
+        renderNewTenantMembers();
+
+        const createForm = h('form', {
+          class: 'admin-box',
+          onsubmit: safe(async (e) => {
+            e.preventDefault();
+            const res = await api('POST', '/api/admin/tenants', {
+              name: nameIn.value.trim(),
+              slug: slugIn.value.trim(),
+              members: Array.from(selectedMembers),
+            });
+            overview = res.overview;
+            S = res.state;
+            syncTenantFromState(S);
+            ui.drawerTaskId = null;
+            ui.phaseId = null;
+            syncUrlWithDrawer(null);
+            render();
+            renderAdminModal();
+            toast(`Project "${S.tenant.name}" berhasil dibuat & diaktifkan`);
+          }),
+        },
+        h('div', { style: { fontWeight: '600', fontSize: '13px' } }, '+ Buat Project / Tenant Baru'),
+        h('div', { class: 'admin-row-2' },
+          h('label', { class: 'field' }, h('span', {}, 'Nama Project / Tenant'), nameIn),
+          h('label', { class: 'field' }, h('span', {}, 'URL Path Slug'), slugIn)),
+        overview.users.some((u) => u.role !== 'superadmin') && h('div', { class: 'field' },
+          h('span', {}, 'Berikan Akses ke Anggota Tim:'),
+          memberPillsWrap),
+        h('div', { style: { display: 'flex', justifyContent: 'flex-end' } },
+          h('button', { type: 'submit', class: 'btn primary small' }, '+ Buat Project Baru')));
+
+        bodyContent = [tenantList, createForm];
+      } else {
+        // Tab Kelola User
+        const userList = h('div', { class: 'admin-list' },
+          overview.users.map((u) => {
+            const isSuperUser = u.role === 'superadmin' || u.username === 'admin';
+            return h('div', { class: 'admin-card' },
+              h('div', { class: 'admin-card-top' },
+                h('div', { class: 'admin-card-title' },
+                  h('span', { class: 'avatar', style: { marginLeft: 0 } }, initials(u.username)),
+                  h('span', {}, u.username),
+                  badge(isSuperUser ? '★ Super Admin (Semua Project)' : 'Member', isSuperUser ? 'st-active' : ''),
+                  !u.hasPassword && badge('Tanpa Password', 'lock')),
+                h('div', { style: { display: 'flex', gap: '5px' } },
+                  h('button', {
+                    type: 'button', class: 'btn xs',
+                    onclick: safe(async () => {
+                      const nextPass = prompt(`Masukkan password baru untuk "${u.username}":`);
+                      if (nextPass === null || !nextPass.trim()) return;
+                      const res = await api('POST', '/api/admin/users', {
+                        username: u.username,
+                        password: nextPass.trim(),
+                        role: u.role,
+                        tenants: u.tenants,
+                      });
+                      overview = res.overview;
+                      S = res.state;
+                      render();
+                      renderAdminModal();
+                      toast(`Password "${u.username}" diperbarui`);
+                    }),
+                  }, 'Ganti Password'),
+                  u.username !== 'admin' && h('button', {
+                    type: 'button', class: 'btn xs',
+                    onclick: safe(async () => {
+                      const nextRole = isSuperUser ? 'user' : 'superadmin';
+                      const res = await api('POST', '/api/admin/users', {
+                        username: u.username,
+                        role: nextRole,
+                        tenants: u.tenants,
+                      });
+                      overview = res.overview;
+                      S = res.state;
+                      render();
+                      renderAdminModal();
+                      toast(`Role "${u.username}" diubah ke ${nextRole}`);
+                    }),
+                  }, isSuperUser ? 'Jadikan Member' : 'Jadikan Super Admin'),
+                  u.username !== 'admin' && u.username !== me && h('button', {
+                    type: 'button', class: 'btn xs danger',
+                    onclick: safe(async () => {
+                      if (!confirm(`Hapus akun user "${u.username}"?`)) return;
+                      const res = await api('DELETE', `/api/admin/users/${u.username}`);
+                      overview = res.overview;
+                      S = res.state;
+                      render();
+                      renderAdminModal();
+                      toast(`User "${u.username}" dihapus`);
+                    }),
+                  }, 'Hapus'))),
+              !isSuperUser && h('div', { style: { display: 'grid', gap: '4px' } },
+                h('span', { class: 'prop-hdr' }, 'Project / Tenant yang Dapat Diakses (Klik untuk toggle):'),
+                h('div', { class: 'pic-pills-wrap' },
+                  overview.tenants.map((t) => {
+                    const has = u.tenants.includes(t.slug);
+                    return h('button', {
+                      type: 'button',
+                      class: 'pic-pill' + (has ? ' is-active' : ''),
+                      onclick: safe(async () => {
+                        const nextTenants = has
+                          ? u.tenants.filter((s) => s !== t.slug)
+                          : [...u.tenants, t.slug];
+                        const res = await api('POST', '/api/admin/users', {
+                          username: u.username,
+                          role: u.role,
+                          tenants: nextTenants,
+                        });
+                        overview = res.overview;
+                        S = res.state;
+                        render();
+                        renderAdminModal();
+                      }),
+                    },
+                    h('span', { class: 'pic-name' }, `📁 ${t.name}`),
+                    has && h('span', { class: 'pic-chk' }, '✓'));
+                  }))));
+          }));
+
+        const uNameIn = h('input', { placeholder: 'Username (mis: budi / sari)', required: true, maxlength: 60 });
+        const uPassIn = h('input', { type: 'password', placeholder: 'Password login', required: true, maxlength: 100 });
+        const uRoleIn = h('select', {},
+          h('option', { value: 'user' }, 'Member (Hanya project yang dipilih)'),
+          h('option', { value: 'superadmin' }, 'Super Admin (Akses semua project & kelola tenant)'));
+
+        const selTenants = new Set(overview.tenants.map((t) => t.slug));
+        const tenantPillsWrap = h('div', { class: 'pic-pills-wrap' });
+        const renderNewUserTenants = () => {
+          tenantPillsWrap.replaceChildren(
+            ...overview.tenants.map((t) => {
+              const on = selTenants.has(t.slug);
+              return h('button', {
+                type: 'button',
+                class: 'pic-pill' + (on ? ' is-active' : ''),
+                onclick: () => {
+                  if (on) selTenants.delete(t.slug);
+                  else selTenants.add(t.slug);
+                  renderNewUserTenants();
+                },
+              },
+              h('span', { class: 'pic-name' }, `📁 ${t.name}`),
+              on && h('span', { class: 'pic-chk' }, '✓'));
+            }),
+          );
+        };
+        renderNewUserTenants();
+
+        const addUserForm = h('form', {
+          class: 'admin-box',
+          onsubmit: safe(async (e) => {
+            e.preventDefault();
+            const res = await api('POST', '/api/admin/users', {
+              username: uNameIn.value.trim(),
+              password: uPassIn.value.trim(),
+              role: uRoleIn.value,
+              tenants: Array.from(selTenants),
+            });
+            overview = res.overview;
+            S = res.state;
+            render();
+            renderAdminModal();
+            toast('Akun user berhasil disimpan ke database');
+          }),
+        },
+        h('div', { style: { fontWeight: '600', fontSize: '13px' } }, '+ Tambah Akun User Baru'),
+        h('div', { class: 'admin-row-2' },
+          h('label', { class: 'field' }, h('span', {}, 'Username'), uNameIn),
+          h('label', { class: 'field' }, h('span', {}, 'Password'), uPassIn)),
+        h('label', { class: 'field' }, h('span', {}, 'Role / Hak Akses'), uRoleIn),
+        h('div', { class: 'field' },
+          h('span', {}, 'Berikan Akses ke Project / Tenant:'),
+          tenantPillsWrap),
+        h('div', { style: { display: 'flex', justifyContent: 'flex-end' } },
+          h('button', { type: 'submit', class: 'btn primary small' }, '+ Simpan User')));
+
+        bodyContent = [userList, addUserForm];
+      }
+
+      dlg.replaceChildren(
+        h('div', { class: 'dlg-in admin-modal' },
+          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' } },
+            h('h2', {}, '⚙️ Super Admin · Kelola Project & User'),
+            storageBadge),
+          h('p', { class: 'intro' }, 'Buat banyak Project/Tenant terpisah dan atur anggota tim mana saja yang dapat mengakses masing-masing project.'),
+          tabBar,
+          ...bodyContent,
+          h('div', { class: 'actions', style: { marginTop: '12px' } },
+            h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Tutup'))));
+    }
+
+    renderAdminModal();
+    dlg.showModal();
+  });
 
   function phaseDialog(p) {
     const ps = phases();
@@ -1885,6 +2285,14 @@
         toast(ui.notifEnabled ? 'Notifikasi perubahan diaktifkan' : 'Notifikasi perubahan dinonaktifkan');
       });
     }
+    const btnTenants = $('#btn-tenants');
+    if (btnTenants) btnTenants.addEventListener('click', () => tenantAdminDialog('tenants'));
+    const tenantSelect = $('#tenant-select');
+    if (tenantSelect) {
+      tenantSelect.addEventListener('change', (e) => {
+        if (e.target.value) switchTenant(e.target.value);
+      });
+    }
     $('#btn-user').addEventListener('click', () => {
       if (ui.needLogin) return;
       userDialog();
@@ -1899,7 +2307,9 @@
       render();
     });
     $('#btn-log').addEventListener('click', logDialog);
-    $('#btn-export').addEventListener('click', () => { window.location.href = '/api/export'; });
+    $('#btn-export').addEventListener('click', () => {
+      window.location.href = '/api/export?tenant=' + encodeURIComponent(currentTenantSlug());
+    });
     $('#btn-reset').addEventListener('click', resetDialog);
     $('#file-import').addEventListener('change', safe(async (e) => {
       const f = e.target.files[0];
@@ -1907,9 +2317,10 @@
       if (!f) return;
       let data;
       try { data = JSON.parse(await f.text()); } catch (_) { throw new Error('File bukan JSON yang valid'); }
-      if (!confirm('Semua data saat ini akan diganti dengan isi file backup. Lanjutkan?')) return;
+      const tName = (S.tenant && S.tenant.name) || currentTenantSlug();
+      if (!confirm(`Semua data pada project "${tName}" saat ini akan diganti dengan isi file backup. Lanjutkan?`)) return;
       await mutate('POST', '/api/import', data);
-      toast('Backup berhasil dipulihkan');
+      toast(`Backup berhasil dipulihkan ke project "${tName}"`);
     }));
     const dlg = $('#dlg');
     dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
@@ -1920,8 +2331,22 @@
     });
     document.addEventListener('dragend', () => { dragging = false; dragId = null; clearDrop(); }, true);
 
-    window.addEventListener('popstate', () => {
+    window.addEventListener('popstate', async () => {
       const r = parseRouteFromPath();
+      if (r.tenant && r.tenant !== currentTenantSlug()) {
+        ui.tenant = r.tenant;
+        store.set('tenant', r.tenant);
+        if (r.view) { ui.view = r.view; store.set('view', r.view); }
+        ui.pendingRouteTaskId = r.cardId || null;
+        try {
+          S = await api('GET', '/api/state');
+          syncTenantFromState(S);
+          if (S.log && S.log[0]) ui.lastSeenLogTs = S.log[0].ts;
+          applyRouteCardIfNeeded();
+          render();
+        } catch (_) { /* abaikan */ }
+        return;
+      }
       if (r.cardId) {
         const t = S.tasks.find((x) => x.id === r.cardId);
         if (t) openTaskDrawer(t, false);
@@ -1942,6 +2367,7 @@
         const r = await api('GET', '/api/rev');
         if (r.rev !== S.rev) {
           const nextState = await api('GET', '/api/state');
+          syncTenantFromState(nextState);
           const newLogs = (nextState.log || []).filter((l) => !ui.lastSeenLogTs || l.ts > ui.lastSeenLogTs);
           if (nextState.log && nextState.log[0]) ui.lastSeenLogTs = nextState.log[0].ts;
           S = nextState;
@@ -1963,6 +2389,7 @@
 
     api('GET', '/api/state').then((d) => {
       S = d;
+      syncTenantFromState(S);
       if (S.log && S.log[0]) ui.lastSeenLogTs = S.log[0].ts;
       applyRouteCardIfNeeded();
       render();

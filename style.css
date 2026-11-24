@@ -977,6 +977,83 @@ dialog:has(.wide) { width: min(640px, calc(100vw - 24px)); }
   color: var(--active);
 }
 
+/* ======================= MULTI-TENANT & SUPER ADMIN UI ======================= */
+.tenant-select {
+  height: 28px;
+  padding: 2px 24px 2px 9px;
+  font-size: 12.5px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--active) 35%, var(--line));
+  background-color: var(--active-bg);
+  color: var(--active);
+  cursor: pointer;
+  max-width: 210px;
+}
+.tenant-select:hover {
+  border-color: var(--active);
+}
+dialog:has(.admin-modal) {
+  width: min(760px, calc(100vw - 24px));
+}
+.admin-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  margin: 10px 0 14px;
+  padding-bottom: 8px;
+}
+.admin-list {
+  display: grid;
+  gap: 8px;
+  max-height: 44vh;
+  overflow: auto;
+  margin-bottom: 14px;
+}
+.admin-card {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px 12px;
+  background: var(--panel-subtle);
+  display: grid;
+  gap: 7px;
+}
+.admin-card.is-current {
+  border-color: color-mix(in srgb, var(--active) 45%, var(--line));
+  background: color-mix(in srgb, var(--active-bg) 35%, var(--panel));
+}
+.admin-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.admin-card-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  font-weight: 600;
+  font-size: 13.5px;
+}
+.admin-box {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 12px;
+  background: var(--panel);
+  display: grid;
+  gap: 10px;
+}
+.admin-row-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+@media (max-width: 560px) {
+  .admin-row-2 { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 960px) {
   .split { grid-template-columns: 1fr; }
   .changes { position: static; max-height: none; }

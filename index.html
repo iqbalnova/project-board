@@ -16,11 +16,13 @@
       </svg>
       <span>Project Board</span>
     </div>
+    <select id="tenant-select" class="tenant-select" aria-label="Pilih Project / Tenant" title="Pilih Project / Tenant Aktif" hidden></select>
     <nav class="tabs" id="tabs">
       <button data-view="timeline">Timeline <span id="pending-badge" class="pill" hidden></span></button>
       <button data-view="kanban">Kanban</button>
     </nav>
     <div class="actions">
+      <button class="btn small" id="btn-tenants" title="Kelola Project/Tenant &amp; User (Super Admin)" hidden>⚙️ Kelola Tenant</button>
       <button class="btn small" id="btn-user" title="Akun aktif / Ganti user">User</button>
       <button class="btn ghost icon-only" id="btn-notif" title="Notifikasi perubahan" aria-label="Notifikasi perubahan"></button>
       <button class="btn ghost icon-only" id="btn-theme" title="Ganti tema" aria-label="Ganti tema"></button>

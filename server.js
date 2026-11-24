@@ -27,9 +27,13 @@ if (fs.existsSync(ENV_FILE)) {
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const DB_FILE = path.join(DATA_DIR, 'db.json');
+const MULTI_FILE = path.join(DATA_DIR, 'multi_db.json');
 const MAX_BODY = 5 * 1024 * 1024;
 const LOG_LIMIT = 500;
 const DAY = 86400000;
+
+let Pool = null;
+try { ({ Pool } = require('pg')); } catch (_) { /* fallback file lokal jika pg belum terpasang */ }
 
 /* ---------- multi-user dari environment variable ---------- */
 // Format APP_USERS: "iqbal:pass123,budi:pass456,sari:pass789" (mendukung pemisah koma, titik koma, atau baris baru)
@@ -56,10 +60,14 @@ function loadUsersFromEnv() {
 
 const USERS = loadUsersFromEnv();
 const AUTH_REQUIRED = USERS.size > 0;
-const TOKEN_SECRET = crypto
-  .createHash('sha256')
-  .update(AUTH_REQUIRED ? Array.from(USERS.entries()).map(([u, p]) => `${u}:${p}`).join('|') : 'open-mode-secret')
-  .digest();
+const SECRET_SEED = [
+  process.env.TOKEN_SECRET || '',
+  process.env.DATABASE_URL || '',
+  process.env.DB_HOST || '',
+  process.env.DB_PASSWORD || '',
+  AUTH_REQUIRED ? Array.from(USERS.entries()).map(([u, p]) => `${u}:${p}`).join('|') : 'open-mode-secret',
+].join('::');
+const TOKEN_SECRET = crypto.createHash('sha256').update(SECRET_SEED).digest();
 
 const TASK_STATUS = ['todo', 'doing', 'review', 'done'];
 const PRIORITY = ['low', 'medium', 'high'];
@@ -181,7 +189,10 @@ function normalize(d) {
   return { rev: Number.isInteger(d.rev) ? d.rev : 1, phases, tasks, changes, log };
 }
 
-function load() {
+const RESERVED_SLUGS = new Set(['api', 'card', 'kanban', 'timeline', 'healthz', 'login', 'logout', 'admin']);
+const slugify = (s) => String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+
+function loadSingleLegacyBoard() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(DB_FILE)) return seed();
   try {
@@ -189,29 +200,300 @@ function load() {
   } catch (e) {
     console.error(`[!] ${DB_FILE} tidak bisa dibaca: ${e.message}`);
     try {
-      const d = normalize(JSON.parse(fs.readFileSync(DB_FILE + '.bak', 'utf8')));
-      console.error('[!] Memakai db.json.bak sebagai gantinya.');
-      return d;
+      return normalize(JSON.parse(fs.readFileSync(DB_FILE + '.bak', 'utf8')));
     } catch (_) {
-      console.error('[!] Backup juga tidak bisa dibaca. Server dihentikan supaya data tidak tertimpa.');
-      process.exit(1);
+      return seed();
     }
   }
 }
 
-let db = load();
-let lastBackup = 0;
-
-function backupNow() {
-  if (fs.existsSync(DB_FILE)) { fs.copyFileSync(DB_FILE, DB_FILE + '.bak'); lastBackup = Date.now(); }
+function buildInitialStore() {
+  const defaultBoard = loadSingleLegacyBoard();
+  const tenants = {
+    main: {
+      slug: 'main',
+      name: 'Project Utama',
+      createdAt: now(),
+      board: defaultBoard,
+    },
+  };
+  const users = {};
+  for (const [u, p] of USERS.entries()) {
+    users[u] = {
+      username: u,
+      password: p,
+      role: u === 'admin' ? 'superadmin' : 'user',
+      tenants: ['main'],
+    };
+  }
+  if (!users.admin) {
+    users.admin = {
+      username: 'admin',
+      password: USERS.get('admin') || process.env.APP_PASSWORD || '',
+      role: 'superadmin',
+      tenants: ['main'],
+    };
+  }
+  if (!USERS.size && fs.existsSync(path.join(__dirname, '.env.example'))) {
+    const ex = fs.readFileSync(path.join(__dirname, '.env.example'), 'utf8');
+    const m = ex.match(/APP_USERS=([^\r\n]+)/);
+    if (m) {
+      for (const part of m[1].split(/[,;]+/)) {
+        const u = part.split(':')[0].trim();
+        if (u && !users[u]) {
+          users[u] = { username: u, password: '', role: u === 'admin' ? 'superadmin' : 'user', tenants: ['main'] };
+        }
+      }
+    }
+  }
+  return { authEnabled: AUTH_REQUIRED, users, tenants };
 }
 
-function save() {
-  db.rev++;
-  const tmp = DB_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(db, null, 1));
-  if (Date.now() - lastBackup > 3600e3) backupNow();
-  fs.renameSync(tmp, DB_FILE);
+function normalizeStore(raw) {
+  const base = buildInitialStore();
+  if (!raw || typeof raw !== 'object') return base;
+  const tenants = {};
+  if (raw.tenants && typeof raw.tenants === 'object') {
+    for (const [k, t] of Object.entries(raw.tenants)) {
+      const slug = slugify(t && (t.slug || k));
+      if (!slug || RESERVED_SLUGS.has(slug)) continue;
+      try {
+        tenants[slug] = {
+          slug,
+          name: str(t.name, 80) || slug,
+          createdAt: t.createdAt || now(),
+          board: normalize(t.board || seed()),
+        };
+      } catch (_) { /* lewati tenant rusak */ }
+    }
+  }
+  if (!Object.keys(tenants).length) Object.assign(tenants, base.tenants);
+  const allSlugs = Object.keys(tenants);
+
+  const users = { ...base.users };
+  if (raw.users && typeof raw.users === 'object') {
+    for (const [k, u] of Object.entries(raw.users)) {
+      const uname = str(u && (u.username || k), 60);
+      if (!uname) continue;
+      const envPass = USERS.get(uname);
+      const pass = typeof (u && u.password) === 'string' && u.password ? u.password : (envPass || '');
+      const role = (uname === 'admin' || (u && u.role === 'superadmin')) ? 'superadmin' : 'user';
+      const userTenants = Array.isArray(u && u.tenants)
+        ? u.tenants.filter((s) => tenants[s])
+        : [allSlugs[0]];
+      users[uname] = {
+        username: uname,
+        password: pass,
+        role,
+        tenants: role === 'superadmin' ? allSlugs : userTenants,
+      };
+    }
+  }
+  // Pastikan user dari env APP_USERS selalu terdaftar
+  for (const [u, p] of USERS.entries()) {
+    if (!users[u]) {
+      users[u] = {
+        username: u,
+        password: p,
+        role: u === 'admin' ? 'superadmin' : 'user',
+        tenants: allSlugs,
+      };
+    } else if (!users[u].password && p) {
+      users[u].password = p;
+    }
+  }
+  if (!users.admin) {
+    users.admin = { username: 'admin', password: USERS.get('admin') || '', role: 'superadmin', tenants: allSlugs };
+  } else {
+    users.admin.role = 'superadmin';
+  }
+  const hasAnyPassword = AUTH_REQUIRED || Object.values(users).some((u) => Boolean(u.password));
+  return { authEnabled: hasAnyPassword, users, tenants };
+}
+
+function loadLocalStore() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (fs.existsSync(MULTI_FILE)) {
+    try {
+      return normalizeStore(JSON.parse(fs.readFileSync(MULTI_FILE, 'utf8')));
+    } catch (e) {
+      console.error(`[!] ${MULTI_FILE} gagal dibaca: ${e.message}`);
+    }
+  }
+  return buildInitialStore();
+}
+
+let store = loadLocalStore();
+let activeTenantSlug = Object.keys(store.tenants)[0] || 'main';
+let db = store.tenants[activeTenantSlug].board;
+let lastBackup = 0;
+
+/* ---------- PostgreSQL Connection (Sakala DB support) ---------- */
+let pgPool = null;
+let pgReady = false;
+
+function buildPgConfig(forceSsl = false) {
+  if (!Pool) return null;
+  const connUrl = (process.env.DATABASE_URL || process.env.POSTGRES_URL || '').trim();
+  const host = (process.env.DB_HOST || process.env.PGHOST || '').trim();
+  const database = (process.env.DB_DATABASE || process.env.DB_NAME || process.env.PGDATABASE || '').trim();
+  const user = (process.env.DB_USERNAME || process.env.DB_USER || process.env.PGUSER || '').trim();
+  const password = process.env.DB_PASSWORD || process.env.PGPASSWORD || '';
+  const port = parseInt(process.env.DB_PORT || process.env.PGPORT || '5432', 10) || 5432;
+  const wantSsl = forceSsl || /sslmode=require/i.test(connUrl) || process.env.DB_SSL === 'true';
+
+  if (connUrl) {
+    const cfg = { connectionString: connUrl, max: 10, idleTimeoutMillis: 30000, connectionTimeoutMillis: 8000 };
+    if (wantSsl) cfg.ssl = { rejectUnauthorized: false };
+    return cfg;
+  }
+  if (host && database && user) {
+    const cfg = { host, port, database, user, password, max: 10, idleTimeoutMillis: 30000, connectionTimeoutMillis: 8000 };
+    if (wantSsl) cfg.ssl = { rejectUnauthorized: false };
+    return cfg;
+  }
+  return null;
+}
+
+async function initPostgres() {
+  let cfg = buildPgConfig(false);
+  if (!cfg) return;
+  try {
+    let pool = new Pool(cfg);
+    try {
+      await pool.query('SELECT 1');
+    } catch (firstErr) {
+      await pool.end().catch(() => {});
+      if (!cfg.ssl) {
+        cfg = buildPgConfig(true);
+        pool = new Pool(cfg);
+        await pool.query('SELECT 1');
+      } else {
+        throw firstErr;
+      }
+    }
+    pgPool = pool;
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS pb_meta (
+        key TEXT PRIMARY KEY,
+        value JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS pb_tenants (
+        slug TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        board JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    const tRes = await pgPool.query('SELECT slug, name, created_at, board FROM pb_tenants ORDER BY created_at ASC');
+    const uRes = await pgPool.query("SELECT value FROM pb_meta WHERE key = 'users'");
+
+    if (tRes.rows.length > 0) {
+      const rawTenants = {};
+      for (const row of tRes.rows) {
+        rawTenants[row.slug] = {
+          slug: row.slug,
+          name: row.name,
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : now(),
+          board: row.board,
+        };
+      }
+      const rawUsers = (uRes.rows[0] && uRes.rows[0].value) ? uRes.rows[0].value : {};
+      store = normalizeStore({ tenants: rawTenants, users: rawUsers });
+      activeTenantSlug = Object.keys(store.tenants)[0] || 'main';
+      db = store.tenants[activeTenantSlug].board;
+      pgReady = true;
+      saveLocalStoreSync();
+      console.log(`[PostgreSQL] Terhubung & memuat ${Object.keys(store.tenants).length} tenant serta ${Object.keys(store.users).length} user.`);
+    } else {
+      pgReady = true;
+      await syncAllToPostgres();
+      console.log(`[PostgreSQL] Tabel baru diinisialisasi & data awal (${Object.keys(store.tenants).length} tenant) disimpan ke PostgreSQL.`);
+    }
+  } catch (err) {
+    console.error(`[!] Gagal terhubung ke PostgreSQL (${err.message}). Menggunakan penyimpanan file lokal sebagai fallback.`);
+    pgReady = false;
+  }
+}
+
+async function syncUsersToPostgres() {
+  if (!pgReady || !pgPool) return;
+  try {
+    await pgPool.query(
+      `INSERT INTO pb_meta (key, value, updated_at) VALUES ('users', $1::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [JSON.stringify(store.users)],
+    );
+  } catch (e) {
+    console.error('[PostgreSQL] Gagal menyimpan users:', e.message);
+  }
+}
+
+async function syncTenantToPostgres(slug) {
+  if (!pgReady || !pgPool) return;
+  const t = store.tenants[slug];
+  if (!t) return;
+  try {
+    await pgPool.query(
+      `INSERT INTO pb_tenants (slug, name, created_at, board, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, NOW())
+       ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, board = EXCLUDED.board, updated_at = NOW()`,
+      [t.slug, t.name, t.createdAt || now(), JSON.stringify(t.board)],
+    );
+  } catch (e) {
+    console.error(`[PostgreSQL] Gagal menyimpan tenant "${slug}":`, e.message);
+  }
+}
+
+async function deleteTenantFromPostgres(slug) {
+  if (!pgReady || !pgPool) return;
+  try {
+    await pgPool.query('DELETE FROM pb_tenants WHERE slug = $1', [slug]);
+  } catch (e) {
+    console.error(`[PostgreSQL] Gagal menghapus tenant "${slug}":`, e.message);
+  }
+}
+
+async function syncAllToPostgres() {
+  if (!pgReady || !pgPool) return;
+  await syncUsersToPostgres();
+  for (const slug of Object.keys(store.tenants)) {
+    await syncTenantToPostgres(slug);
+  }
+}
+
+function backupNow() {
+  if (fs.existsSync(MULTI_FILE)) { fs.copyFileSync(MULTI_FILE, MULTI_FILE + '.bak'); lastBackup = Date.now(); }
+}
+
+function saveLocalStoreSync() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const tmp = MULTI_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(store, null, 1));
+    if (Date.now() - lastBackup > 3600e3) backupNow();
+    fs.renameSync(tmp, MULTI_FILE);
+  } catch (e) {
+    console.error('[!] Gagal menyimpan file lokal:', e.message);
+  }
+}
+
+function save(tenantSlug = activeTenantSlug) {
+  const t = store.tenants[tenantSlug];
+  if (t) {
+    t.board.rev++;
+  }
+  saveLocalStoreSync();
+  syncTenantToPostgres(tenantSlug);
+}
+
+function saveMetaAndTenant(tenantSlug = null) {
+  saveLocalStoreSync();
+  syncUsersToPostgres();
+  if (tenantSlug) syncTenantToPostgres(tenantSlug);
 }
 
 function addLog(text, user, taskId = null) {
@@ -220,11 +502,34 @@ function addLog(text, user, taskId = null) {
   if (db.log.length > LOG_LIMIT) db.log.length = LOG_LIMIT;
 }
 
-/* ---------- auth & session helper ---------- */
+/* ---------- auth, role & tenant access helper ---------- */
 const safeEq = (a, b) => crypto.timingSafeEqual(
   crypto.createHash('sha256').update(String(a)).digest(),
   crypto.createHash('sha256').update(String(b)).digest(),
 );
+
+const isAuthRequired = () => Boolean(store.authEnabled || AUTH_REQUIRED || Object.values(store.users).some((u) => Boolean(u.password)));
+const isSuperAdmin = (username) => Boolean(username === 'admin' || (store.users[username] && store.users[username].role === 'superadmin'));
+
+function allowedTenantsFor(username) {
+  const all = Object.values(store.tenants);
+  if (!username) return [];
+  if (!isAuthRequired() || isSuperAdmin(username)) return all;
+  const u = store.users[username];
+  if (!u) return [];
+  const list = Array.isArray(u.tenants) ? u.tenants : [];
+  return all.filter((t) => list.includes(t.slug));
+}
+
+function usersForTenant(tenantSlug) {
+  const out = new Set(['admin']);
+  for (const u of Object.values(store.users)) {
+    if (u.role === 'superadmin' || u.username === 'admin' || (Array.isArray(u.tenants) && u.tenants.includes(tenantSlug))) {
+      out.add(u.username);
+    }
+  }
+  return Array.from(out);
+}
 
 function signUser(username) {
   const sig = crypto.createHmac('sha256', TOKEN_SECRET).update(username).digest('base64url');
@@ -240,7 +545,7 @@ function verifyToken(token) {
   const sig = token.slice(dot + 1);
   const expected = crypto.createHmac('sha256', TOKEN_SECRET).update(username).digest('base64url');
   if (!safeEq(sig, expected)) return null;
-  if (AUTH_REQUIRED && !USERS.has(username)) return null;
+  if (isAuthRequired() && !store.users[username]) return null;
   return username;
 }
 
@@ -255,8 +560,11 @@ function parseCookies(req) {
 }
 
 function checkCredentials(username, password) {
-  for (const [u, p] of USERS.entries()) {
-    if (safeEq(u, username) && safeEq(p, password)) return u;
+  for (const u of Object.values(store.users)) {
+    if (safeEq(u.username, username)) {
+      if (!u.password && !isAuthRequired()) return u.username;
+      if (u.password && safeEq(u.password, password)) return u.username;
+    }
   }
   return null;
 }
@@ -274,7 +582,7 @@ function getAuthUser(req) {
     if (i >= 0) {
       const u = raw.slice(0, i);
       const p = raw.slice(i + 1);
-      if (AUTH_REQUIRED) {
+      if (isAuthRequired()) {
         const matched = checkCredentials(u, p);
         if (matched) return matched;
       } else if (u.trim()) {
@@ -282,7 +590,7 @@ function getAuthUser(req) {
       }
     }
   }
-  if (!AUTH_REQUIRED) {
+  if (!isAuthRequired()) {
     return 'admin';
   }
   return null;
@@ -400,65 +708,229 @@ const routes = [];
 const route = (method, pattern, fn) =>
   routes.push({ method, re: new RegExp('^' + pattern.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), fn });
 
-const stateWithMeta = (user) => {
-  const userSet = new Set(['admin', ...Array.from(USERS.keys())]);
-  if (!USERS.size && fs.existsSync( path.join(__dirname, '.env.example') )) {
-    const ex = fs.readFileSync(path.join(__dirname, '.env.example'), 'utf8');
-    const m = ex.match(/APP_USERS=([^\r\n]+)/);
-    if (m) {
-      for (const part of m[1].split(/[,;]+/)) {
-        const u = part.split(':')[0].trim();
-        if (u) userSet.add(u);
-      }
-    }
+const stateWithMeta = (user, tenantSlug = activeTenantSlug) => {
+  const allowed = allowedTenantsFor(user);
+  let t = store.tenants[tenantSlug];
+  if (!t || !allowed.some((x) => x.slug === t.slug)) {
+    t = allowed[0] || Object.values(store.tenants)[0];
   }
-  if (user) userSet.add(user);
+  const slug = t ? t.slug : 'main';
+  const board = t ? t.board : db;
+  const tenantUsers = usersForTenant(slug);
+  if (user && !tenantUsers.includes(user)) tenantUsers.push(user);
+
   return {
-    ...db,
+    ...board,
+    tenant: t ? { slug: t.slug, name: t.name } : { slug: 'main', name: 'Project Utama' },
+    tenants: allowed.map((x) => ({ slug: x.slug, name: x.name })),
+    storage: pgReady ? 'postgresql' : 'local-file',
     me: {
       user,
-      authRequired: AUTH_REQUIRED,
-      users: Array.from(userSet),
+      role: isSuperAdmin(user) ? 'superadmin' : 'user',
+      isSuperAdmin: isSuperAdmin(user),
+      authRequired: isAuthRequired(),
+      users: tenantUsers,
     },
   };
 };
-const saved = (user) => { save(); return stateWithMeta(user); };
+const saved = (user) => { save(activeTenantSlug); return stateWithMeta(user, activeTenantSlug); };
 
-route('GET', '/api/state', ({ user }) => stateWithMeta(user));
-route('GET', '/api/rev', () => ({ rev: db.rev, latestLog: db.log[0] || null }));
+function buildAdminOverview() {
+  const allSlugs = Object.keys(store.tenants);
+  return {
+    storage: pgReady ? 'postgresql' : 'local-file',
+    tenants: Object.values(store.tenants).map((t) => ({
+      slug: t.slug,
+      name: t.name,
+      createdAt: t.createdAt,
+      phasesCount: (t.board.phases || []).length,
+      tasksCount: (t.board.tasks || []).length,
+      doneCount: (t.board.tasks || []).filter((x) => x.status === 'done').length,
+      members: Object.values(store.users)
+        .filter((u) => u.role === 'superadmin' || u.username === 'admin' || (Array.isArray(u.tenants) && u.tenants.includes(t.slug)))
+        .map((u) => u.username),
+    })),
+    users: Object.values(store.users).map((u) => ({
+      username: u.username,
+      role: (u.role === 'superadmin' || u.username === 'admin') ? 'superadmin' : 'user',
+      hasPassword: Boolean(u.password),
+      tenants: (u.role === 'superadmin' || u.username === 'admin')
+        ? allSlugs
+        : (Array.isArray(u.tenants) ? u.tenants.filter((s) => store.tenants[s]) : []),
+    })),
+  };
+}
+
+route('GET', '/api/state', ({ user }) => stateWithMeta(user, activeTenantSlug));
+route('GET', '/api/rev', () => ({ rev: db.rev, latestLog: db.log[0] || null, tenant: activeTenantSlug }));
+
+/* ---------- Super Admin: Tenant & User Management ---------- */
+route('GET', '/api/admin/overview', ({ user }) => {
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang dapat mengelola Tenant & User');
+  return buildAdminOverview();
+});
+
+route('POST', '/api/admin/tenants', ({ body, user }) => {
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang dapat membuat Tenant baru');
+  const name = str(body.name, 80);
+  if (!name) throw bad('Nama Project / Tenant wajib diisi');
+  const slug = slugify(body.slug || name);
+  if (!slug || slug.length < 2) throw bad('Slug URL minimal 2 karakter huruf/angka');
+  if (RESERVED_SLUGS.has(slug)) throw bad(`Slug "${slug}" adalah kata sistem tercadang, gunakan slug lain`);
+  if (store.tenants[slug]) throw conflict(`Tenant dengan slug "${slug}" sudah ada`);
+
+  const newBoard = seed();
+  addLog.call(null, `Tenant "${name}" (${slug}) dibuat`, user);
+  newBoard.log = [{ ts: now(), text: `Project / Tenant "${name}" dibuat (oleh ${user})`, by: user, taskId: null }];
+
+  store.tenants[slug] = {
+    slug,
+    name,
+    createdAt: now(),
+    board: newBoard,
+  };
+
+  const members = Array.isArray(body.members) ? body.members.map((m) => str(m, 60)).filter(Boolean) : [];
+  for (const u of Object.values(store.users)) {
+    if (u.role === 'superadmin' || u.username === 'admin' || members.includes(u.username)) {
+      const set = new Set(Array.isArray(u.tenants) ? u.tenants : []);
+      set.add(slug);
+      u.tenants = Array.from(set);
+    }
+  }
+
+  saveMetaAndTenant(slug);
+  return {
+    overview: buildAdminOverview(),
+    state: stateWithMeta(user, slug),
+  };
+});
+
+route('PATCH', '/api/admin/tenants/:slug', ({ params, body, user }) => {
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang dapat mengubah Tenant');
+  const t = store.tenants[params.slug];
+  if (!t) throw notFound('Tenant tidak ditemukan');
+  if (body.name !== undefined) {
+    const name = str(body.name, 80);
+    if (!name) throw bad('Nama Tenant tidak boleh kosong');
+    t.name = name;
+  }
+  if (Array.isArray(body.members)) {
+    const memberSet = new Set(body.members.map((m) => str(m, 60)).filter(Boolean));
+    for (const u of Object.values(store.users)) {
+      const cur = new Set(Array.isArray(u.tenants) ? u.tenants : []);
+      if (u.role === 'superadmin' || u.username === 'admin' || memberSet.has(u.username)) {
+        cur.add(t.slug);
+      } else {
+        cur.delete(t.slug);
+      }
+      u.tenants = Array.from(cur);
+    }
+  }
+  saveMetaAndTenant(t.slug);
+  return {
+    overview: buildAdminOverview(),
+    state: stateWithMeta(user, activeTenantSlug),
+  };
+});
+
+route('DELETE', '/api/admin/tenants/:slug', ({ params, user }) => {
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang dapat menghapus Tenant');
+  const slug = params.slug;
+  if (!store.tenants[slug]) throw notFound('Tenant tidak ditemukan');
+  if (Object.keys(store.tenants).length <= 1) throw bad('Minimal harus ada 1 Project / Tenant aktif');
+  delete store.tenants[slug];
+  for (const u of Object.values(store.users)) {
+    if (Array.isArray(u.tenants)) {
+      u.tenants = u.tenants.filter((s) => s !== slug);
+    }
+  }
+  saveLocalStoreSync();
+  syncUsersToPostgres();
+  deleteTenantFromPostgres(slug);
+  const nextSlug = Object.keys(store.tenants)[0];
+  return {
+    overview: buildAdminOverview(),
+    state: stateWithMeta(user, nextSlug),
+  };
+});
+
+route('POST', '/api/admin/users', ({ body, user }) => {
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang dapat mengelola User');
+  const username = str(body.username, 60).toLowerCase().replace(/[^a-z0-9._-]/g, '');
+  if (!username) throw bad('Username wajib diisi (huruf/angka)');
+  const existing = store.users[username];
+  const password = typeof body.password === 'string' ? body.password.trim() : '';
+  if (!existing && !password) throw bad('Password wajib diisi untuk user baru');
+
+  const role = (username === 'admin' || body.role === 'superadmin') ? 'superadmin' : 'user';
+  const allSlugs = Object.keys(store.tenants);
+  const tenants = role === 'superadmin'
+    ? allSlugs
+    : (Array.isArray(body.tenants) ? body.tenants.filter((s) => store.tenants[s]) : (existing ? existing.tenants : [allSlugs[0]]));
+
+  store.users[username] = {
+    username,
+    password: password || (existing ? existing.password : ''),
+    role,
+    tenants,
+  };
+  store.authEnabled = Object.values(store.users).some((u) => Boolean(u.password));
+  saveMetaAndTenant(null);
+  return {
+    overview: buildAdminOverview(),
+    state: stateWithMeta(user, activeTenantSlug),
+  };
+});
+
+route('DELETE', '/api/admin/users/:username', ({ params, user }) => {
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang dapat menghapus User');
+  const target = params.username;
+  if (target === 'admin') throw bad('Akun super admin utama (admin) tidak dapat dihapus');
+  if (target === user) throw bad('Tidak dapat menghapus akun yang sedang Anda gunakan login');
+  if (!store.users[target]) throw notFound('User tidak ditemukan');
+  delete store.users[target];
+  saveMetaAndTenant(null);
+  return {
+    overview: buildAdminOverview(),
+    state: stateWithMeta(user, activeTenantSlug),
+  };
+});
 
 route('GET', '/api/export', () => ({
   __send: true, status: 200,
   headers: {
     'Content-Type': 'application/json; charset=utf-8',
-    'Content-Disposition': `attachment; filename="kanban-backup-${todayStr()}.json"`,
+    'Content-Disposition': `attachment; filename="kanban-${activeTenantSlug}-${todayStr()}.json"`,
   },
   body: JSON.stringify(db, null, 1),
 }));
 
 route('POST', '/api/import', ({ body, user }) => {
-  if (user !== 'admin') throw forbidden('Hanya akun admin yang memiliki izin untuk restore/import database');
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang memiliki izin untuk restore/import database');
   let nd;
   try { nd = normalize(body); } catch (e) { throw bad('File backup tidak valid: ' + e.message); }
   backupNow();
   nd.rev = db.rev;
+  store.tenants[activeTenantSlug].board = nd;
   db = nd;
-  addLog('Data diimpor dari file backup', user);
+  addLog(`Data project "${store.tenants[activeTenantSlug].name}" diimpor dari file backup`, user);
   return saved(user);
 });
 
 route('POST', '/api/reset', ({ body, user }) => {
-  if (user !== 'admin') throw forbidden('Hanya akun admin yang memiliki izin untuk reset / clear database');
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang memiliki izin untuk reset / clear database');
   backupNow();
   const rev = db.rev;
   if (body && body.mode === 'seed') {
     db = seed();
     db.rev = rev;
-    addLog('Database di-reset ke data awal (Phase 1)', user);
+    addLog('Database project di-reset ke data awal (Phase 1)', user);
   } else {
     db = { rev, phases: [], tasks: [], changes: [], log: [] };
-    addLog('Database dikosongkan (Clear DB)', user);
+    addLog('Database project dikosongkan (Clear DB)', user);
   }
+  store.tenants[activeTenantSlug].board = db;
   return saved(user);
 });
 
@@ -743,15 +1215,36 @@ function readBody(req) {
   });
 }
 
+const SPA_PATH_RE = /^\/(?:(timeline|kanban|card\/[a-zA-Z0-9_-]+|kanban\/card\/[a-zA-Z0-9_-]+)|([a-zA-Z0-9_-]+)(?:\/(timeline|kanban|card\/[a-zA-Z0-9_-]+|kanban\/card\/[a-zA-Z0-9_-]+))?)\/?$/;
+
+function applyRequestTenantContext(req, parsedUrl, user) {
+  const allowed = allowedTenantsFor(user);
+  if (!allowed.length) {
+    throw forbidden('Akun Anda belum ditugaskan ke Project / Tenant mana pun. Hubungi Super Admin.');
+  }
+  const reqSlug = slugify(req.headers['x-tenant'] || parsedUrl.searchParams.get('tenant') || '');
+  let target = reqSlug ? allowed.find((t) => t.slug === reqSlug) : null;
+  if (!target) {
+    if (reqSlug && req.method !== 'GET' && !parsedUrl.pathname.startsWith('/api/admin/')) {
+      throw forbidden(`Anda tidak memiliki akses ke project "${reqSlug}"`);
+    }
+    target = allowed[0];
+  }
+  activeTenantSlug = target.slug;
+  db = target.board;
+  return target;
+}
+
 const server = http.createServer(async (req, res) => {
   try {
-    const { pathname } = new URL(req.url, 'http://localhost');
+    const parsedUrl = new URL(req.url, 'http://localhost');
+    const { pathname } = parsedUrl;
     if (pathname === '/healthz') return send(res, 200, 'ok', { 'Content-Type': 'text/plain' });
 
     // Static assets selalu dapat diakses agar halaman Login in-app bisa dimuat
     if (req.method === 'GET' && assets[pathname]) return serveAsset(req, res, assets[pathname]);
-    // Deep-link SPA routes (/timeline, /kanban, /card/:id, /kanban/card/:id) disajikan sebagai index.html
-    if (req.method === 'GET' && /^\/(timeline|kanban|card\/[a-zA-Z0-9_-]+|kanban\/card\/[a-zA-Z0-9_-]+)\/?$/.test(pathname)) {
+    // Deep-link SPA routes (/timeline, /kanban, /card/:id, /<tenant>/timeline, /<tenant>/kanban, /<tenant>/card/:id)
+    if (req.method === 'GET' && !pathname.startsWith('/api/') && SPA_PATH_RE.test(pathname)) {
       return serveAsset(req, res, assets['/']);
     }
 
@@ -764,18 +1257,29 @@ const server = http.createServer(async (req, res) => {
       if (!username) throw bad('Username wajib diisi');
 
       let validUser = username;
-      if (AUTH_REQUIRED) {
+      if (isAuthRequired()) {
         validUser = checkCredentials(username, password);
         if (!validUser) throw new HttpError(401, 'Username atau password salah');
+      } else if (!store.users[validUser]) {
+        store.users[validUser] = {
+          username: validUser,
+          password: '',
+          role: validUser === 'admin' ? 'superadmin' : 'user',
+          tenants: Object.keys(store.tenants),
+        };
+        saveMetaAndTenant(null);
       }
+      const allowed = allowedTenantsFor(validUser);
+      const reqSlug = slugify(req.headers['x-tenant'] || parsedUrl.searchParams.get('tenant') || '');
+      const chosen = (reqSlug && allowed.find((t) => t.slug === reqSlug)) || allowed[0];
       const token = signUser(validUser);
-      return sendJson(res, 200, stateWithMeta(validUser), {
+      return sendJson(res, 200, stateWithMeta(validUser, chosen ? chosen.slug : 'main'), {
         'Set-Cookie': `pb_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
       });
     }
 
     if (pathname === '/api/logout' && req.method === 'POST') {
-      return sendJson(res, 200, { ok: true, authRequired: AUTH_REQUIRED }, {
+      return sendJson(res, 200, { ok: true, authRequired: isAuthRequired() }, {
         'Set-Cookie': 'pb_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
       });
     }
@@ -793,6 +1297,7 @@ const server = http.createServer(async (req, res) => {
         if (r.method !== req.method) continue;
         const m = pathname.match(r.re);
         if (!m) continue;
+        applyRequestTenantContext(req, parsedUrl, user);
         let body = {};
         if (req.method !== 'GET') {
           if (!/^application\/json/i.test(req.headers['content-type'] || '')) throw new HttpError(415, 'Content-Type harus application/json');
@@ -814,16 +1319,21 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Kanban Timeline berjalan di port ${PORT}`);
-  console.log(`Data: ${DB_FILE}`);
-  if (AUTH_REQUIRED) {
-    console.log(`Multi-user aktif (${USERS.size} akun terdaftar dari env APP_USERS/APP_PASSWORD): ${Array.from(USERS.keys()).join(', ')}`);
-  } else {
-    console.warn('[!] APP_USERS / APP_PASSWORD kosong: mode terbuka (user bisa ganti nama langsung di UI).');
-  }
+initPostgres().finally(() => {
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Kanban Timeline Multi-Tenant berjalan di port ${PORT}`);
+    console.log(`Storage: ${pgReady ? 'PostgreSQL (Sakala DB)' : `Local File (${MULTI_FILE})`}`);
+    console.log(`Tenants: ${Object.keys(store.tenants).join(', ')}`);
+    console.log(`Users (${Object.keys(store.users).length}): ${Object.keys(store.users).join(', ')}`);
+  });
 });
 
 for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => { server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000).unref(); });
+  process.on(sig, () => {
+    server.close(async () => {
+      if (pgPool) await pgPool.end().catch(() => {});
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 2000).unref();
+  });
 }
