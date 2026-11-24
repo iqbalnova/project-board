@@ -984,83 +984,62 @@ dialog:has(.wide) { width: min(640px, calc(100vw - 24px)); }
   color: var(--active);
 }
 
-/* ======================= MULTI-TENANT & SUPER ADMIN PAGE UI ======================= */
+/* ======================= MULTI-PROJECT & ADMIN UI (MINIMALIST) ======================= */
 .tenant-select {
   height: 28px;
   padding: 2px 24px 2px 9px;
   font-size: 12.5px;
-  font-weight: 600;
+  font-weight: 500;
   border-radius: 6px;
-  border: 1px solid color-mix(in srgb, var(--active) 35%, var(--line));
-  background-color: var(--active-bg);
-  color: var(--active);
+  border: 1px solid var(--line);
+  background-color: var(--panel-subtle);
+  color: var(--text);
   cursor: pointer;
-  max-width: 210px;
+  max-width: 200px;
   text-overflow: ellipsis;
 }
 .tenant-select:hover {
-  border-color: var(--active);
-}
-.admin-page {
-  display: grid;
-  gap: 16px;
-}
-.admin-hero {
-  padding: 16px 18px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  flex-wrap: wrap;
-}
-.admin-hero h2 {
-  font-size: 16px;
-  font-weight: 700;
-  letter-spacing: -0.015em;
-}
-.admin-hero p {
-  font-size: 12.5px;
-  color: var(--muted);
-  margin-top: 2px;
+  border-color: var(--line-strong);
 }
 .admin-grid {
   display: grid;
-  grid-template-columns: 1.05fr 0.95fr;
+  grid-template-columns: 1fr 1fr;
   gap: 16px;
   align-items: start;
 }
 .admin-panel {
   padding: 16px;
   display: grid;
-  gap: 14px;
+  gap: 12px;
 }
 .admin-panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-bottom: 10px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--line);
 }
 .admin-panel-head h3 {
-  font-size: 14px;
-  font-weight: 650;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 .admin-list {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 .admin-card {
   border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 12px;
-  background: var(--panel-subtle);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: var(--panel);
   display: grid;
   gap: 8px;
 }
 .admin-card.is-current {
-  border-color: color-mix(in srgb, var(--active) 45%, var(--line));
-  background: color-mix(in srgb, var(--active-bg) 35%, var(--panel));
+  border-color: var(--line-strong);
+  background: var(--panel-subtle);
 }
 .admin-card-top {
   display: flex;
@@ -1072,23 +1051,32 @@ dialog:has(.wide) { width: min(640px, calc(100vw - 24px)); }
 .admin-card-title {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   flex-wrap: wrap;
-  font-weight: 600;
-  font-size: 13.5px;
+  font-weight: 500;
+  font-size: 13px;
 }
 .admin-box {
   border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 12px;
-  background: var(--panel);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: var(--panel-subtle);
   display: grid;
-  gap: 10px;
-}
-.admin-row-2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+.admin-inline-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.admin-inline-row input {
+  flex: 1;
+  min-width: 0;
+}
+.admin-row-3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 6px;
 }
 
 @media (max-width: 960px) {
@@ -1136,7 +1124,7 @@ dialog:has(.wide) { width: min(640px, calc(100vw - 24px)); }
   main { padding: 12px; }
   .brand-text { display: none; }
   .tenant-select { max-width: 180px; }
-  .admin-row-2 { grid-template-columns: 1fr; }
+  .admin-row-3 { grid-template-columns: 1fr; }
   .state-seg button span.st-txt { display: none; }
   .board { grid-template-columns: repeat(4, 82vw); scroll-snap-type: x mandatory; }
   .col { scroll-snap-align: start; }

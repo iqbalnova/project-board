@@ -279,21 +279,13 @@ function normalizeStore(raw) {
     Object.assign(users, base.users);
   }
 
-  // Pastikan akun Super Admin utama dari env selalu aktif
-  if (!users[SUPER_ADMIN_USER]) {
-    users[SUPER_ADMIN_USER] = {
-      username: SUPER_ADMIN_USER,
-      password: SUPER_ADMIN_PASSWORD,
-      role: 'superadmin',
-      tenants: allSlugs,
-    };
-  } else {
-    users[SUPER_ADMIN_USER].role = 'superadmin';
-    users[SUPER_ADMIN_USER].tenants = allSlugs;
-    if (process.env.SUPER_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD) {
-      users[SUPER_ADMIN_USER].password = SUPER_ADMIN_PASSWORD;
-    }
-  }
+  // Pastikan akun Super Admin utama dari env selalu mengikuti env dan tidak bisa diubah dari DB
+  users[SUPER_ADMIN_USER] = {
+    username: SUPER_ADMIN_USER,
+    password: SUPER_ADMIN_PASSWORD,
+    role: 'superadmin',
+    tenants: allSlugs,
+  };
   return { authEnabled: true, users, tenants };
 }
 
@@ -721,10 +713,23 @@ const stateWithMeta = (user, tenantSlug = activeTenantSlug) => {
 };
 const saved = (user) => { save(activeTenantSlug); return stateWithMeta(user, activeTenantSlug); };
 
+function generateUniqueSlug(name) {
+  let base = slugify(name);
+  if (!base || base.length < 2) base = 'project';
+  if (RESERVED_SLUGS.has(base)) base = 'proj-' + base;
+  let slug = base;
+  let n = 2;
+  while (store.tenants[slug] || RESERVED_SLUGS.has(slug)) {
+    slug = `${base}-${n++}`;
+  }
+  return slug;
+}
+
 function buildAdminOverview() {
   const allSlugs = Object.keys(store.tenants);
   return {
     storage: pgReady ? 'postgresql' : 'local-file',
+    superAdminEnvUser: SUPER_ADMIN_USER,
     tenants: Object.values(store.tenants).map((t) => ({
       slug: t.slug,
       name: t.name,
@@ -733,14 +738,15 @@ function buildAdminOverview() {
       tasksCount: (t.board.tasks || []).length,
       doneCount: (t.board.tasks || []).filter((x) => x.status === 'done').length,
       members: Object.values(store.users)
-        .filter((u) => u.role === 'superadmin' || u.username === 'admin' || (Array.isArray(u.tenants) && u.tenants.includes(t.slug)))
+        .filter((u) => u.role === 'superadmin' || u.username === SUPER_ADMIN_USER || (Array.isArray(u.tenants) && u.tenants.includes(t.slug)))
         .map((u) => u.username),
     })),
     users: Object.values(store.users).map((u) => ({
       username: u.username,
-      role: (u.role === 'superadmin' || u.username === 'admin') ? 'superadmin' : 'user',
+      isEnvSuperAdmin: u.username === SUPER_ADMIN_USER,
+      role: (u.role === 'superadmin' || u.username === SUPER_ADMIN_USER) ? 'superadmin' : 'user',
       hasPassword: Boolean(u.password),
-      tenants: (u.role === 'superadmin' || u.username === 'admin')
+      tenants: (u.role === 'superadmin' || u.username === SUPER_ADMIN_USER)
         ? allSlugs
         : (Array.isArray(u.tenants) ? u.tenants.filter((s) => store.tenants[s]) : []),
     })),
@@ -750,24 +756,20 @@ function buildAdminOverview() {
 route('GET', '/api/state', ({ user }) => stateWithMeta(user, activeTenantSlug));
 route('GET', '/api/rev', () => ({ rev: db.rev, latestLog: db.log[0] || null, tenant: activeTenantSlug }));
 
-/* ---------- Super Admin: Tenant & User Management ---------- */
+/* ---------- Super Admin: Project & User Management ---------- */
 route('GET', '/api/admin/overview', ({ user }) => {
-  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang dapat mengelola Tenant & User');
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat mengakses halaman ini');
   return buildAdminOverview();
 });
 
 route('POST', '/api/admin/tenants', ({ body, user }) => {
-  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang dapat membuat Tenant baru');
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat membuat Project baru');
   const name = str(body.name, 80);
-  if (!name) throw bad('Nama Project / Tenant wajib diisi');
-  const slug = slugify(body.slug || name);
-  if (!slug || slug.length < 2) throw bad('Slug URL minimal 2 karakter huruf/angka');
-  if (RESERVED_SLUGS.has(slug)) throw bad(`Slug "${slug}" adalah kata sistem tercadang, gunakan slug lain`);
-  if (store.tenants[slug]) throw conflict(`Tenant dengan slug "${slug}" sudah ada`);
+  if (!name) throw bad('Nama project wajib diisi');
+  const slug = generateUniqueSlug(name);
 
   const newBoard = seed();
-  addLog.call(null, `Tenant "${name}" (${slug}) dibuat`, user);
-  newBoard.log = [{ ts: now(), text: `Project / Tenant "${name}" dibuat (oleh ${user})`, by: user, taskId: null }];
+  newBoard.log = [{ ts: now(), text: `Project "${name}" dibuat (oleh ${user})`, by: user, taskId: null }];
 
   store.tenants[slug] = {
     slug,
@@ -778,7 +780,7 @@ route('POST', '/api/admin/tenants', ({ body, user }) => {
 
   const members = Array.isArray(body.members) ? body.members.map((m) => str(m, 60)).filter(Boolean) : [];
   for (const u of Object.values(store.users)) {
-    if (u.role === 'superadmin' || u.username === 'admin' || members.includes(u.username)) {
+    if (u.role === 'superadmin' || u.username === SUPER_ADMIN_USER || members.includes(u.username)) {
       const set = new Set(Array.isArray(u.tenants) ? u.tenants : []);
       set.add(slug);
       u.tenants = Array.from(set);
@@ -793,19 +795,19 @@ route('POST', '/api/admin/tenants', ({ body, user }) => {
 });
 
 route('PATCH', '/api/admin/tenants/:slug', ({ params, body, user }) => {
-  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang dapat mengubah Tenant');
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat mengubah Project');
   const t = store.tenants[params.slug];
-  if (!t) throw notFound('Tenant tidak ditemukan');
+  if (!t) throw notFound('Project tidak ditemukan');
   if (body.name !== undefined) {
     const name = str(body.name, 80);
-    if (!name) throw bad('Nama Tenant tidak boleh kosong');
+    if (!name) throw bad('Nama project tidak boleh kosong');
     t.name = name;
   }
   if (Array.isArray(body.members)) {
     const memberSet = new Set(body.members.map((m) => str(m, 60)).filter(Boolean));
     for (const u of Object.values(store.users)) {
       const cur = new Set(Array.isArray(u.tenants) ? u.tenants : []);
-      if (u.role === 'superadmin' || u.username === 'admin' || memberSet.has(u.username)) {
+      if (u.role === 'superadmin' || u.username === SUPER_ADMIN_USER || memberSet.has(u.username)) {
         cur.add(t.slug);
       } else {
         cur.delete(t.slug);
@@ -821,10 +823,10 @@ route('PATCH', '/api/admin/tenants/:slug', ({ params, body, user }) => {
 });
 
 route('DELETE', '/api/admin/tenants/:slug', ({ params, user }) => {
-  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang dapat menghapus Tenant');
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat menghapus Project');
   const slug = params.slug;
-  if (!store.tenants[slug]) throw notFound('Tenant tidak ditemukan');
-  if (Object.keys(store.tenants).length <= 1) throw bad('Minimal harus ada 1 Project / Tenant aktif');
+  if (!store.tenants[slug]) throw notFound('Project tidak ditemukan');
+  if (Object.keys(store.tenants).length <= 1) throw bad('Minimal harus ada 1 project aktif');
   delete store.tenants[slug];
   for (const u of Object.values(store.users)) {
     if (Array.isArray(u.tenants)) {
@@ -842,14 +844,17 @@ route('DELETE', '/api/admin/tenants/:slug', ({ params, user }) => {
 });
 
 route('POST', '/api/admin/users', ({ body, user }) => {
-  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang dapat mengelola User');
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat mengelola User');
   const username = str(body.username, 60).toLowerCase().replace(/[^a-z0-9._-]/g, '');
   if (!username) throw bad('Username wajib diisi (huruf/angka)');
+  if (username === SUPER_ADMIN_USER) {
+    throw forbidden('Akun Super Admin utama diatur lewat environment variable dan tidak dapat diubah dari sistem');
+  }
   const existing = store.users[username];
   const password = typeof body.password === 'string' ? body.password.trim() : '';
   if (!existing && !password) throw bad('Password wajib diisi untuk user baru');
 
-  const role = (username === 'admin' || body.role === 'superadmin') ? 'superadmin' : 'user';
+  const role = body.role === 'superadmin' ? 'superadmin' : 'user';
   const allSlugs = Object.keys(store.tenants);
   const tenants = role === 'superadmin'
     ? allSlugs
@@ -870,10 +875,10 @@ route('POST', '/api/admin/users', ({ body, user }) => {
 });
 
 route('DELETE', '/api/admin/users/:username', ({ params, user }) => {
-  if (!isSuperAdmin(user)) throw forbidden('Hanya Super Admin yang dapat menghapus User');
+  if (!isSuperAdmin(user)) throw forbidden('Hanya Admin yang dapat menghapus User');
   const target = params.username;
-  if (target === 'admin') throw bad('Akun super admin utama (admin) tidak dapat dihapus');
-  if (target === user) throw bad('Tidak dapat menghapus akun yang sedang Anda gunakan login');
+  if (target === SUPER_ADMIN_USER) throw forbidden('Akun Super Admin utama dari environment variable tidak dapat dihapus');
+  if (target === user) throw bad('Tidak dapat menghapus akun yang sedang digunakan');
   if (!store.users[target]) throw notFound('User tidak ditemukan');
   delete store.users[target];
   saveMetaAndTenant(null);

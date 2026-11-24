@@ -143,7 +143,7 @@
 
     if (btn) {
       btn.hidden = false;
-      btn.textContent = (u || 'admin') + (isSuper ? ' ★' : '') + ' · Logout';
+      btn.textContent = u || 'admin';
     }
     if (btnNotif) btnNotif.hidden = false;
     if (tabs) tabs.hidden = false;
@@ -162,7 +162,7 @@
       } else {
         tenantSelect.hidden = false;
         tenantSelect.replaceChildren(
-          ...list.map((t) => h('option', { value: t.slug, selected: t.slug === curSlug }, `📁 ${t.name}`)),
+          ...list.map((t) => h('option', { value: t.slug, selected: t.slug === curSlug }, t.name)),
         );
       }
     }
@@ -391,7 +391,7 @@
       },
     },
     h('div', { class: 'notif-head' },
-      h('span', {}, count > 1 ? `🔔 ${count} Perubahan Baru` : '🔔 Perubahan Baru'),
+      h('span', {}, count > 1 ? `${count} Perubahan Baru` : 'Perubahan Baru'),
       h('button', {
         type: 'button',
         class: 'notif-close',
@@ -399,7 +399,7 @@
         onclick: (e) => { e.stopPropagation(); card.remove(); },
       }, '×')),
     h('div', { class: 'notif-body' }, logItem.text),
-    task && h('div', { class: 'notif-action' }, `Buka Card #${task.id} →`));
+    task && h('div', { class: 'notif-action' }, `Buka #${task.id} →`));
 
     stack.prepend(card);
     while (stack.children.length > 3) stack.lastElementChild.remove();
@@ -463,14 +463,8 @@
 
     dlg.replaceChildren(
       h('div', { class: 'dlg-in' },
-        h('h2', {}, `Akun Aktif: ${me}`),
-        h('p', { class: 'intro' }, 'Untuk berpindah ke akun lain, silakan keluar (Logout) terlebih dahulu.'),
-        h('div', { class: 'admin-card', style: { margin: '10px 0 14px' } },
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-            h('span', { class: 'avatar', style: { marginLeft: 0 } }, initials(me)),
-            h('strong', {}, me),
-            badge(isSuper ? '🛡️ Admin' : 'Member', isSuper ? 'st-active' : '')),
-          h('div', { class: 'small muted' }, `Project yang dapat diakses: ${assignedTenants}`)),
+        h('h2', {}, me),
+        h('p', { class: 'intro' }, `Role: ${isSuper ? 'Admin' : 'User'} · Project: ${assignedTenants}`),
         h('div', { class: 'actions-row' },
           h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Batal'),
           h('button', {
@@ -482,9 +476,9 @@
               ui.drawerTaskId = null;
               ui.adminOverview = null;
               render();
-              toast('Anda telah keluar (Logout)');
+              toast('Logout berhasil');
             }),
-          }, 'Logout / Keluar Akun'))));
+          }, 'Logout'))));
     dlg.showModal();
   }
 
@@ -641,7 +635,7 @@
       if (cardEl) {
         cardEl.classList.add('is-selected');
         if (!cardEl.querySelector('.tcard-active-tag')) {
-          cardEl.prepend(h('div', { class: 'tcard-active-tag' }, `● Sedang dibuka · #${t.id}`));
+          cardEl.prepend(h('div', { class: 'tcard-active-tag' }, `Dibuka · #${t.id}`));
         }
       }
       renderDrawer();
@@ -708,14 +702,14 @@
       h('div', { class: 'drawer-top-actions' },
         h('button', {
           type: 'button', class: 'btn xs',
-          title: `Salin link langsung ke card ini (/card/${t.id})`,
+          title: `Salin link card`,
           onclick: () => copyCardLink(t),
-        }, '🔗 Copy Link'),
+        }, 'Copy Link'),
         h('button', {
           type: 'button', class: 'btn xs',
-          title: 'Refresh data & komentar terbaru',
+          title: 'Refresh data',
           onclick: () => refreshState(true),
-        }, '↻ Refresh'),
+        }, 'Refresh'),
         h('button', {
           type: 'button', class: 'btn xs danger',
           onclick: safe(async () => {
@@ -724,7 +718,7 @@
             closeTaskDrawer();
           }),
         }, 'Hapus'),
-        h('button', { type: 'button', class: 'btn xs', onclick: () => closeTaskDrawer() }, 'Tutup ✕')));
+        h('button', { type: 'button', class: 'btn xs', onclick: () => closeTaskDrawer() }, 'Tutup')));
 
     // Title input (auto-save)
     const titleIn = h('input', {
@@ -1066,7 +1060,7 @@
     dlg.showModal();
   }
 
-  /* ======================= HALAMAN DEPAN ADMIN: KELOLA TENANT & USER ======================= */
+  /* ======================= HALAMAN ADMIN: PROJECT & USER (MINIMALIST) ======================= */
   let adminLoading = false;
   async function loadAdminOverview() {
     if (adminLoading) return;
@@ -1085,17 +1079,11 @@
     const me = (S.me && S.me.user) || 'admin';
     if (!ui.adminOverview) {
       loadAdminOverview();
-      return h('div', { class: 'panel empty' }, 'Memuat Dashboard Admin (Tenant & User)…');
+      return h('div', { class: 'panel empty' }, 'Memuat…');
     }
 
     const overview = ui.adminOverview;
     const curSlug = currentTenantSlug();
-    const slugifyLocal = (s) => String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
-
-    const storageBadge = badge(
-      overview.storage === 'postgresql' ? '🗄️ PostgreSQL (Sakala DB Aktif)' : '📁 Local File Storage',
-      overview.storage === 'postgresql' ? 'st-done' : 'st-active',
-    );
 
     const applyAdminResp = (res, msg) => {
       ui.adminOverview = res.overview;
@@ -1105,19 +1093,12 @@
       if (msg) toast(msg);
     };
 
-    // 1. PANEL KIRI: KELOLA PROJECT / TENANT
-    const nameIn = h('input', { placeholder: 'Nama Project (mis: Sakala Mobile / ERP Gmedia)', required: true, maxlength: 80 });
-    const slugIn = h('input', { placeholder: 'Slug URL (mis: sakala-mobile)', required: true, maxlength: 40 });
-    let slugTouched = false;
-    nameIn.addEventListener('input', () => {
-      if (!slugTouched) slugIn.value = slugifyLocal(nameIn.value);
-    });
-    slugIn.addEventListener('input', () => { slugTouched = true; slugIn.value = slugifyLocal(slugIn.value); });
-
-    const regularUsers = overview.users.filter((u) => u.role !== 'superadmin');
+    // 1. KOLOM KIRI: PROJECT
+    const nameIn = h('input', { placeholder: 'Nama project baru…', required: true, maxlength: 80 });
+    const regularUsers = overview.users.filter((u) => !u.isEnvSuperAdmin && u.role !== 'superadmin');
     const selectedMembers = new Set(regularUsers.map((u) => u.username));
     const memberPillsWrap = h('div', { class: 'pic-pills-wrap' });
-    const renderNewTenantMembers = () => {
+    const renderNewProjectMembers = () => {
       memberPillsWrap.replaceChildren(
         ...regularUsers.map((u) => {
           const on = selectedMembers.has(u.username);
@@ -1127,124 +1108,113 @@
             onclick: () => {
               if (on) selectedMembers.delete(u.username);
               else selectedMembers.add(u.username);
-              renderNewTenantMembers();
+              renderNewProjectMembers();
             },
           },
-          h('span', { class: 'pic-avatar' }, initials(u.username)),
           h('span', { class: 'pic-name' }, u.username),
           on && h('span', { class: 'pic-chk' }, '✓'));
         }),
       );
     };
-    renderNewTenantMembers();
+    renderNewProjectMembers();
 
-    const createTenantForm = h('form', {
+    const createProjectForm = h('form', {
       class: 'admin-box',
       onsubmit: safe(async (e) => {
         e.preventDefault();
         const res = await api('POST', '/api/admin/tenants', {
           name: nameIn.value.trim(),
-          slug: slugIn.value.trim(),
           members: Array.from(selectedMembers),
         });
-        applyAdminResp(res, `Tenant "${res.state.tenant.name}" berhasil dibuat`);
+        applyAdminResp(res, `Project "${res.state.tenant.name}" dibuat`);
       }),
     },
-    h('div', { style: { fontWeight: '600', fontSize: '13px' } }, '+ Buat Project / Tenant Baru'),
-    h('div', { class: 'admin-row-2' },
-      h('label', { class: 'field' }, h('span', {}, 'Nama Project / Tenant'), nameIn),
-      h('label', { class: 'field' }, h('span', {}, 'URL Path Slug'), slugIn)),
-    regularUsers.length > 0 && h('div', { class: 'field' },
-      h('span', {}, 'Assign Anggota Tim ke Project Ini:'),
-      memberPillsWrap),
-    h('div', { style: { display: 'flex', justifyContent: 'flex-end' } },
-      h('button', { type: 'submit', class: 'btn primary small' }, '+ Tambah Tenant')));
+    h('div', { class: 'admin-inline-row' },
+      nameIn,
+      h('button', { type: 'submit', class: 'btn primary small' }, 'Tambah')),
+    regularUsers.length > 0 && memberPillsWrap);
 
-    const tenantList = h('div', { class: 'admin-list' },
+    const projectList = h('div', { class: 'admin-list' },
       overview.tenants.map((t) => {
         const isCur = t.slug === curSlug;
         return h('div', { class: 'admin-card' + (isCur ? ' is-current' : '') },
           h('div', { class: 'admin-card-top' },
             h('div', { class: 'admin-card-title' },
-              h('span', {}, `📁 ${t.name}`),
-              h('span', { class: 'card-id-pill', title: `URL: /${t.slug}/timeline` }, `/${t.slug}`),
-              badge(`${t.phasesCount} Phase · ${t.doneCount}/${t.tasksCount} Task`, '')),
-            h('div', { style: { display: 'flex', gap: '5px', flexWrap: 'wrap' } },
+              h('span', {}, t.name),
+              h('span', { class: 'muted small' }, `/${t.slug} · ${t.doneCount}/${t.tasksCount} task`)),
+            h('div', { style: { display: 'flex', gap: '4px', flexWrap: 'wrap' } },
               h('button', {
                 type: 'button', class: 'btn xs primary',
                 onclick: () => switchTenant(t.slug, true, 'timeline'),
-              }, 'Buka Timeline →'),
+              }, 'Timeline'),
               h('button', {
                 type: 'button', class: 'btn xs',
                 onclick: () => switchTenant(t.slug, true, 'kanban'),
-              }, 'Buka Kanban →'),
+              }, 'Kanban'),
               h('button', {
                 type: 'button', class: 'btn xs',
                 onclick: safe(async () => {
-                  const nextName = prompt('Ubah nama Project / Tenant:', t.name);
+                  const nextName = prompt('Nama project:', t.name);
                   if (!nextName || !nextName.trim() || nextName.trim() === t.name) return;
                   const res = await api('PATCH', `/api/admin/tenants/${t.slug}`, { name: nextName.trim() });
                   applyAdminResp(res, 'Nama project diperbarui');
                 }),
-              }, 'Ubah Nama'),
+              }, 'Rename'),
               overview.tenants.length > 1 && h('button', {
                 type: 'button', class: 'btn xs danger',
                 onclick: safe(async () => {
-                  if (!confirm(`Hapus project "${t.name}" (/${t.slug}) beserta seluruh phase dan task di dalamnya?`)) return;
+                  if (!confirm(`Hapus project "${t.name}"?`)) return;
                   const res = await api('DELETE', `/api/admin/tenants/${t.slug}`);
                   applyAdminResp(res, `Project "${t.name}" dihapus`);
                 }),
               }, 'Hapus'))),
-          regularUsers.length > 0 && h('div', { style: { display: 'grid', gap: '4px' } },
-            h('span', { class: 'prop-hdr' }, 'User yang Di-assign ke Project Ini (Klik untuk toggle akses):'),
-            h('div', { class: 'pic-pills-wrap' },
-              regularUsers.map((u) => {
-                const hasAccess = t.members.includes(u.username);
-                return h('button', {
-                  type: 'button',
-                  class: 'pic-pill' + (hasAccess ? ' is-active' : ''),
-                  onclick: safe(async () => {
-                    const nextMembers = hasAccess
-                      ? t.members.filter((m) => m !== u.username)
-                      : [...t.members, u.username];
-                    const res = await api('PATCH', `/api/admin/tenants/${t.slug}`, { members: nextMembers });
-                    applyAdminResp(res);
-                  }),
-                },
-                h('span', { class: 'pic-avatar' }, initials(u.username)),
-                h('span', { class: 'pic-name' }, u.username),
-                hasAccess && h('span', { class: 'pic-chk' }, '✓'));
-              }))));
+          regularUsers.length > 0 && h('div', { class: 'pic-pills-wrap' },
+            regularUsers.map((u) => {
+              const hasAccess = t.members.includes(u.username);
+              return h('button', {
+                type: 'button',
+                class: 'pic-pill' + (hasAccess ? ' is-active' : ''),
+                onclick: safe(async () => {
+                  const nextMembers = hasAccess
+                    ? t.members.filter((m) => m !== u.username)
+                    : [...t.members, u.username];
+                  const res = await api('PATCH', `/api/admin/tenants/${t.slug}`, { members: nextMembers });
+                  applyAdminResp(res);
+                }),
+              },
+              h('span', { class: 'pic-name' }, u.username),
+              hasAccess && h('span', { class: 'pic-chk' }, '✓'));
+            })));
       }));
 
-    // 2. PANEL KANAN: KELOLA USER & SET ADMIN
-    const uNameIn = h('input', { placeholder: 'Username baru (mis: budi / sari)', required: true, maxlength: 60 });
-    const uPassIn = h('input', { type: 'password', placeholder: 'Password login', required: true, maxlength: 100 });
+    // 2. KOLOM KANAN: USER
+    const uNameIn = h('input', { placeholder: 'Username', required: true, maxlength: 60 });
+    const uPassIn = h('input', { type: 'password', placeholder: 'Password', required: true, maxlength: 100 });
     const uRoleIn = h('select', {},
-      h('option', { value: 'user' }, 'User / Member (Hanya bisa akses project yang di-assign)'),
-      h('option', { value: 'superadmin' }, 'Admin (Bisa kelola tenant, user & akses semua project)'));
+      h('option', { value: 'user' }, 'User'),
+      h('option', { value: 'superadmin' }, 'Admin'));
 
-    const selTenants = new Set(overview.tenants.map((t) => t.slug));
-    const tenantPillsWrap = h('div', { class: 'pic-pills-wrap' });
-    const renderNewUserTenants = () => {
-      tenantPillsWrap.replaceChildren(
+    const selProjects = new Set(overview.tenants.map((t) => t.slug));
+    const projectPillsWrap = h('div', { class: 'pic-pills-wrap' });
+    const renderNewUserProjects = () => {
+      projectPillsWrap.replaceChildren(
         ...overview.tenants.map((t) => {
-          const on = selTenants.has(t.slug);
+          const on = selProjects.has(t.slug);
           return h('button', {
             type: 'button',
             class: 'pic-pill' + (on ? ' is-active' : ''),
             onclick: () => {
-              if (on) selTenants.delete(t.slug);
-              else selTenants.add(t.slug);
-              renderNewUserTenants();
+              if (on) selProjects.delete(t.slug);
+              else selProjects.add(t.slug);
+              renderNewUserProjects();
             },
           },
-          h('span', { class: 'pic-name' }, `📁 ${t.name}`),
+          h('span', { class: 'pic-name' }, t.name),
           on && h('span', { class: 'pic-chk' }, '✓'));
         }),
       );
     };
-    renderNewUserTenants();
+    renderNewUserProjects();
 
     const addUserForm = h('form', {
       class: 'admin-box',
@@ -1254,36 +1224,29 @@
           username: uNameIn.value.trim(),
           password: uPassIn.value.trim(),
           role: uRoleIn.value,
-          tenants: Array.from(selTenants),
+          tenants: Array.from(selProjects),
         });
-        applyAdminResp(res, 'Akun user berhasil ditambahkan');
+        applyAdminResp(res, 'User ditambahkan');
       }),
     },
-    h('div', { style: { fontWeight: '600', fontSize: '13px' } }, '+ Tambah Akun User Baru'),
-    h('div', { class: 'admin-row-2' },
-      h('label', { class: 'field' }, h('span', {}, 'Username'), uNameIn),
-      h('label', { class: 'field' }, h('span', {}, 'Password'), uPassIn)),
-    h('label', { class: 'field' }, h('span', {}, 'Role Akun'), uRoleIn),
-    h('div', { class: 'field' },
-      h('span', {}, 'Assign ke Project / Tenant:'),
-      tenantPillsWrap),
+    h('div', { class: 'admin-row-3' }, uNameIn, uPassIn, uRoleIn),
+    projectPillsWrap,
     h('div', { style: { display: 'flex', justifyContent: 'flex-end' } },
-      h('button', { type: 'submit', class: 'btn primary small' }, '+ Tambah User')));
+      h('button', { type: 'submit', class: 'btn primary small' }, 'Tambah User')));
 
     const userList = h('div', { class: 'admin-list' },
       overview.users.map((u) => {
-        const isSuperUser = u.role === 'superadmin' || u.username === 'admin';
+        const isEnvRoot = Boolean(u.isEnvSuperAdmin);
+        const isSuperUser = u.role === 'superadmin' || isEnvRoot;
         return h('div', { class: 'admin-card' },
           h('div', { class: 'admin-card-top' },
             h('div', { class: 'admin-card-title' },
-              h('span', { class: 'avatar', style: { marginLeft: 0 } }, initials(u.username)),
               h('span', {}, u.username),
-              badge(isSuperUser ? '🛡️ Admin' : 'User', isSuperUser ? 'st-active' : ''),
-              !u.hasPassword && badge('Tanpa Password', 'lock')),
-            h('div', { style: { display: 'flex', gap: '5px', flexWrap: 'wrap' } },
-              u.username !== 'admin' && h('button', {
+              badge(isEnvRoot ? 'Super Admin (Env)' : (isSuperUser ? 'Admin' : 'User'), isSuperUser ? 'st-active' : '')),
+            !isEnvRoot && h('div', { style: { display: 'flex', gap: '4px', flexWrap: 'wrap' } },
+              h('button', {
                 type: 'button',
-                class: 'btn xs ' + (isSuperUser ? '' : 'primary'),
+                class: 'btn xs',
                 onclick: safe(async () => {
                   const nextRole = isSuperUser ? 'user' : 'superadmin';
                   const res = await api('POST', '/api/admin/users', {
@@ -1291,13 +1254,13 @@
                     role: nextRole,
                     tenants: u.tenants,
                   });
-                  applyAdminResp(res, `Role "${u.username}" diubah menjadi ${nextRole === 'superadmin' ? 'Admin' : 'User'}`);
+                  applyAdminResp(res, `Role "${u.username}" diubah ke ${nextRole === 'superadmin' ? 'Admin' : 'User'}`);
                 }),
-              }, isSuperUser ? 'Ubah Jadi User Biasa' : '★ Set Jadi Admin'),
+              }, isSuperUser ? 'Set User' : 'Set Admin'),
               h('button', {
                 type: 'button', class: 'btn xs',
                 onclick: safe(async () => {
-                  const nextPass = prompt(`Masukkan password baru untuk "${u.username}":`);
+                  const nextPass = prompt(`Password baru untuk "${u.username}":`);
                   if (nextPass === null || !nextPass.trim()) return;
                   const res = await api('POST', '/api/admin/users', {
                     username: u.username,
@@ -1305,66 +1268,51 @@
                     role: u.role,
                     tenants: u.tenants,
                   });
-                  applyAdminResp(res, `Password "${u.username}" diperbarui`);
+                  applyAdminResp(res, 'Password diperbarui');
                 }),
-              }, 'Ganti Password'),
-              u.username !== 'admin' && u.username !== me && h('button', {
+              }, 'Password'),
+              u.username !== me && h('button', {
                 type: 'button', class: 'btn xs danger',
                 onclick: safe(async () => {
-                  if (!confirm(`Hapus akun user "${u.username}"?`)) return;
+                  if (!confirm(`Hapus user "${u.username}"?`)) return;
                   const res = await api('DELETE', `/api/admin/users/${u.username}`);
                   applyAdminResp(res, `User "${u.username}" dihapus`);
                 }),
               }, 'Hapus'))),
-          isSuperUser
-            ? h('div', { class: 'small muted' }, 'Admin memiliki akses penuh ke seluruh Project/Tenant serta pengelolaan user.')
-            : h('div', { style: { display: 'grid', gap: '4px' } },
-                h('span', { class: 'prop-hdr' }, 'Tenant / Project yang Di-assign (Klik untuk tambah / cabut):'),
-                h('div', { class: 'pic-pills-wrap' },
-                  overview.tenants.map((t) => {
-                    const has = u.tenants.includes(t.slug);
-                    return h('button', {
-                      type: 'button',
-                      class: 'pic-pill' + (has ? ' is-active' : ''),
-                      onclick: safe(async () => {
-                        const nextTenants = has
-                          ? u.tenants.filter((s) => s !== t.slug)
-                          : [...u.tenants, t.slug];
-                        const res = await api('POST', '/api/admin/users', {
-                          username: u.username,
-                          role: u.role,
-                          tenants: nextTenants,
-                        });
-                        applyAdminResp(res);
-                      }),
-                    },
-                    h('span', { class: 'pic-name' }, `📁 ${t.name}`),
-                    has && h('span', { class: 'pic-chk' }, '✓'));
-                  }))));
+          !isSuperUser && h('div', { class: 'pic-pills-wrap' },
+            overview.tenants.map((t) => {
+              const has = u.tenants.includes(t.slug);
+              return h('button', {
+                type: 'button',
+                class: 'pic-pill' + (has ? ' is-active' : ''),
+                onclick: safe(async () => {
+                  const nextTenants = has
+                    ? u.tenants.filter((s) => s !== t.slug)
+                    : [...u.tenants, t.slug];
+                  const res = await api('POST', '/api/admin/users', {
+                    username: u.username,
+                    role: u.role,
+                    tenants: nextTenants,
+                  });
+                  applyAdminResp(res);
+                }),
+              },
+              h('span', { class: 'pic-name' }, t.name),
+              has && h('span', { class: 'pic-chk' }, '✓'));
+            })));
       }));
 
-    return h('div', { class: 'admin-page' },
-      h('section', { class: 'panel admin-hero' },
-        h('div', {},
-          h('h2', {}, '🛡️ Dashboard Admin — Kelola Tenant & Akun User'),
-          h('p', {}, 'Buat project/tenant baru, tambahkan akun user, angkat user menjadi Admin, atau atur penugasan project tiap user.')),
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-          storageBadge,
-          h('button', {
-            type: 'button', class: 'btn small',
-            onclick: () => loadAdminOverview(),
-          }, '↻ Refresh Data'))),
-      h('div', { class: 'admin-grid' },
-        h('section', { class: 'panel admin-panel' },
-          h('div', { class: 'admin-panel-head' },
-            h('h3', {}, `📁 Kelola Project / Tenant (${overview.tenants.length})`)),
-          createTenantForm,
-          tenantList),
-        h('section', { class: 'panel admin-panel' },
-          h('div', { class: 'admin-panel-head' },
-            h('h3', {}, `👥 Kelola Akun User & Role (${overview.users.length})`)),
-          addUserForm,
-          userList)));
+    return h('div', { class: 'admin-grid' },
+      h('section', { class: 'panel admin-panel' },
+        h('div', { class: 'admin-panel-head' },
+          h('h3', {}, `Project (${overview.tenants.length})`)),
+        createProjectForm,
+        projectList),
+      h('section', { class: 'panel admin-panel' },
+        h('div', { class: 'admin-panel-head' },
+          h('h3', {}, `User (${overview.users.length})`)),
+        addUserForm,
+        userList));
   }
 
   function phaseDialog(p) {
@@ -2146,7 +2094,7 @@
       },
       ondragend: (e) => { e.currentTarget.classList.remove('dragging'); dragging = false; dragId = null; clearDrop(); },
     },
-    isSelected && h('div', { class: 'tcard-active-tag' }, `● Sedang dibuka · #${t.id}`),
+    isSelected && h('div', { class: 'tcard-active-tag' }, `Dibuka · #${t.id}`),
     h('div', { class: 'tt' }, t.title),
     h('div', { class: 'tmeta' },
       bCount > 0 && badge(bCount > 1 ? `${bCount} Blocker` : 'Blocker', 'over'),
